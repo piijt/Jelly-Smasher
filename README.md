@@ -48,6 +48,7 @@ That's exactly one level of Jelly-Smasher.
 | ⚾ | **Bat** | Heavy and blunt. Big launches for juggling. |
 | ✨ | **Saber** | Glowing, light, whippy. |
 | 🐟 | **Fish** | You know why. |
+| 🪓 | **Whirlwind Axe** | Heavy head, barely any drag. Spin it in circles and it becomes a whirlwind that sucks slimes in and chops everything in reach. |
 
 ![Rage leap](assets/rage.png)
 

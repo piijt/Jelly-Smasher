@@ -7,6 +7,8 @@ let screenArea = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, 
 let windowSize = isTrial ? NSSize(width: 900, height: 560) : NSSize(width: screenArea.width - 20, height: screenArea.height - 20)
 let gravity: CGFloat = 1500
 let sliceSpeed: CGFloat = 480
+// Spin in radians per second above which the axe turns into a whirlwind.
+let whirlSpin: CGFloat = 8
 let penguinReach: CGFloat = 58
 
 struct Burst {
@@ -20,26 +22,26 @@ struct Burst {
 let saberGlow = NSColor(calibratedRed: 1, green: 0.16, blue: 0.14, alpha: 1)
 
 enum Weapon {
-    case bat, katana, saber, fish
+    case bat, katana, saber, fish, axe
 
-    var length: CGFloat { [150, 175, 170, 140][index] }
+    var length: CGFloat { [150, 175, 170, 140, 165][index] }
 
     // Where the weight sits along the weapon: a barrel-heavy bat swings slower than a light blade.
-    var balance: CGFloat { [0.65, 0.45, 0.3, 0.6][index] }
+    var balance: CGFloat { [0.65, 0.45, 0.3, 0.6, 0.85][index] }
 
-    var damping: CGFloat { [1.4, 1.0, 0.9, 1.2][index] }
+    var damping: CGFloat { [1.4, 1.0, 0.9, 1.2, 0.35][index] }
 
     var isBlade: Bool { self == .katana || self == .saber }
 
-    var isBlunt: Bool { self == .bat || self == .fish }
+    var isBlunt: Bool { self == .bat || self == .fish || self == .axe }
 
     var index: Int { Weapon.all.firstIndex(of: self) ?? 0 }
 
-    var label: String { ["⚾ bat", "⚔️ katana", "✨ saber", "🐟 fish"][index] }
+    var label: String { ["⚾ bat", "⚔️ katana", "✨ saber", "🐟 fish", "🪓 axe"][index] }
 
-    var hit: String { self == .fish ? "SLAP" : "BOINK" }
+    var hit: String { self == .fish ? "SLAP" : self == .axe ? "CHOP" : "BOINK" }
 
-    static let all: [Weapon] = [.bat, .katana, .saber, .fish]
+    static let all: [Weapon] = [.bat, .katana, .saber, .fish, .axe]
 }
 
 struct Cut {
@@ -447,6 +449,10 @@ final class BoinkView: NSView {
 
     func isOverToggle(_ point: CGPoint) -> Bool { toggleFrame.contains(point) || vibeFrame.contains(point) }
 
+    var isWhirling: Bool { weapon == .axe && abs(spin) > whirlSpin && !isGameOver }
+
+    var whirlReach: CGFloat { weapon.length + 20 }
+
     var vibeSeat: CGPoint { CGPoint(x: bounds.maxX - 70, y: bounds.minY + 30) }
 
     func isOverVibingPenguin(_ point: CGPoint) -> Bool { isNear(point, CGPoint(x: vibeSeat.x, y: vibeSeat.y + 22), 36) }
@@ -464,7 +470,7 @@ final class BoinkView: NSView {
         guard next != weapon else { return }
         weapon = next
         swoosh = []
-        NSSound(named: ["Tink", "Glass", "Submarine", "Morse", "Bottle"][next.index])?.play()
+        NSSound(named: ["Tink", "Glass", "Submarine", "Morse", "Sosumi"][next.index])?.play()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -755,6 +761,16 @@ final class BoinkView: NSView {
         }
     }
 
+    func whirlPull() {
+        guard isWhirling, !me.isGone else { return }
+        let toward = handle.x - me.jellyX
+        guard abs(toward) < whirlReach * 2.5, abs(toward) > 10 else { return }
+        // Nudging the position directly keeps a fleeing slime from simply outrunning the wind.
+        let margin = radius + 8
+        me.jellyX = clamp(me.jellyX + (toward > 0 ? 1 : -1) * min(abs(toward), 280 * tick), margin, bounds.width - margin)
+        if !isAirborne && abs(toward) < whirlReach * 1.5 { me.liftSpeed = max(me.liftSpeed, 220) }
+    }
+
     func knockOut() {
         kos += 1
         me.health = 0
@@ -840,8 +856,15 @@ final class BoinkView: NSView {
         }
         let contact = blade.first { abs($0.x - me.jellyX) < radius * 0.85 && $0.y > floor + 4 && $0.y < top - 4 }
 
+        let offset = CGVector(dx: me.jellyX - handle.x, dy: bodyCenter.y - handle.y)
+        let gap = max(hypot(offset.dx, offset.dy), 0.001)
         // A dodge only counts once a fast swing has passed close by and gone again without landing.
-        if weapon.isBlade, let contact, speed > sliceSpeed, sinceBoink > 0.35 {
+        if isWhirling && gap < whirlReach + radius * 0.6 && sinceBoink > 0.4 {
+            // The whirlwind hits along its spin, with a lift so chopped slimes stay up for the next pass.
+            let swirl = clamp(spin * whirlReach, -1000, 1000)
+            boink(velocity: CGVector(dx: -offset.dy / gap * swirl, dy: offset.dx / gap * swirl + 350))
+            me.isNearMiss = false
+        } else if weapon.isBlade, let contact, speed > sliceSpeed, sinceBoink > 0.35 {
             boink(velocity: velocity, slicingAt: contact)
             me.isNearMiss = false
         } else if weapon.isBlunt && speed > boinkSpeed && isTouching && sinceBoink > 0.4 {
@@ -1091,6 +1114,7 @@ final class BoinkView: NSView {
         lastBarrel = barrel
         forEachBlob {
             if !isGameOver { rampage() }
+            whirlPull()
             fly()
             flee()
             heal()
@@ -1135,6 +1159,7 @@ final class BoinkView: NSView {
     }
 
     func drawWorld() {
+        drawWhirlwind()
         drawSwoosh()
 
         forEachBlob {
@@ -1153,6 +1178,7 @@ final class BoinkView: NSView {
         case .katana: drawKatana()
         case .saber: drawSaber()
         case .fish: drawFish()
+        case .axe: drawAxe()
         }
         drawFlippers()
         drawBursts()
@@ -1311,6 +1337,33 @@ extension BoinkView {
 
     var deepColor: NSColor { rainbowTurn == 0 ? jellyDeep : shifted(jellyDeep, by: rainbowTurn) }
 
+    func drawWhirlwind() {
+        guard weapon == .axe else { return }
+        let strength = clamp((abs(spin) - whirlSpin * 0.6) / (whirlSpin * 0.8), 0, 1)
+        guard strength > 0 else { return }
+        let turn = spin > 0 ? 1 : -1 as CGFloat
+        for ring in 0..<4 {
+            let r = whirlReach * (0.55 + 0.17 * CGFloat(ring))
+            let start = (angle * 57.3 + CGFloat(ring) * 77) .truncatingRemainder(dividingBy: 360)
+            let gust = NSBezierPath()
+            gust.appendArc(withCenter: handle, radius: r, startAngle: start, endAngle: start - turn * 140, clockwise: turn > 0)
+            gust.lineWidth = 3 + CGFloat(ring) * 1.5
+            gust.lineCapStyle = .round
+            NSColor(calibratedRed: 0.75, green: 0.9, blue: 1, alpha: 0.3 * strength * (1 - CGFloat(ring) * 0.15)).setStroke()
+            gust.stroke()
+        }
+        if isWhirling {
+            NSColor(calibratedRed: 0.75, green: 0.9, blue: 1, alpha: 0.08).setFill()
+            circle(handle, whirlReach).fill()
+            if Int(clock * 60) % 3 == 0 {
+                let a = CGFloat.random(in: 0...(2 * .pi))
+                particles.append(Particle(position: CGPoint(x: handle.x + cos(a) * whirlReach, y: max(ground, handle.y + sin(a) * whirlReach)),
+                                          velocity: CGVector(dx: -sin(a) * 400 * turn, dy: cos(a) * 400 * turn + 120),
+                                          life: 0, span: 0.5, size: CGFloat.random(in: 2...4), color: NSColor.white.withAlphaComponent(0.6)))
+            }
+        }
+    }
+
     func drawSwoosh() {
         for (index, pair) in zip(swoosh, swoosh.dropFirst()).enumerated() {
             let fraction = CGFloat(index) / CGFloat(swooshLength)
@@ -1321,7 +1374,7 @@ extension BoinkView {
             streak.lineCapStyle = .round
             let tint = weapon == .saber ? saberGlow : NSColor.white
             streak.lineWidth = weapon == .saber ? 2 + fraction * 10 : streak.lineWidth
-            tint.withAlphaComponent(fraction * fraction * [0.14, 0.4, 0.55, 0.14][weapon.index]).setStroke()
+            tint.withAlphaComponent(fraction * fraction * [0.14, 0.4, 0.55, 0.14, 0.3][weapon.index]).setStroke()
             streak.stroke()
         }
     }
@@ -1372,6 +1425,70 @@ extension BoinkView {
 
         woodDark.setFill()
         circle(handle, 5.5).fill()
+    }
+
+    func drawAxe() {
+        let dx = barrel.x - handle.x
+        let dy = barrel.y - handle.y
+        let length = max(hypot(dx, dy), 0.001)
+        let along = CGVector(dx: dx / length, dy: dy / length)
+        let side = CGVector(dx: -along.dy, dy: along.dx)
+        func at(_ t: CGFloat, _ offset: CGFloat) -> CGPoint {
+            CGPoint(x: handle.x + along.dx * length * t + side.dx * offset, y: handle.y + along.dy * length * t + side.dy * offset)
+        }
+
+        let shaft = NSBezierPath()
+        shaft.move(to: at(0, 0))
+        shaft.line(to: at(0.97, 0))
+        shaft.lineCapStyle = .round
+        if held != nil {
+            shaft.lineWidth = 11
+            NSColor.systemYellow.withAlphaComponent(0.35).setStroke()
+            shaft.stroke()
+        }
+        shaft.lineWidth = 6
+        woodDark.setStroke()
+        shaft.stroke()
+        shaft.lineWidth = 3.5
+        wood.setStroke()
+        shaft.stroke()
+        for band in [0.04, 0.1, 0.16] as [CGFloat] {
+            let grip = NSBezierPath()
+            grip.move(to: at(band, 3.5))
+            grip.line(to: at(band + 0.03, -3.5))
+            grip.lineWidth = 3
+            NSColor(calibratedRed: 0.35, green: 0.2, blue: 0.1, alpha: 1).setStroke()
+            grip.stroke()
+        }
+
+        for flank: CGFloat in [-1, 1] {
+            let bit = NSBezierPath()
+            bit.move(to: at(0.84, flank * 3))
+            bit.line(to: at(0.74, flank * 27))
+            bit.curve(to: at(1.06, flank * 27), controlPoint1: at(0.82, flank * 40), controlPoint2: at(1.0, flank * 40))
+            bit.line(to: at(0.96, flank * 3))
+            bit.close()
+            NSGraphicsContext.saveGraphicsState()
+            bit.addClip()
+            NSGradient(colors: [steelDark, steel, .white, steel])?
+                .draw(from: at(0.9, 0), to: at(0.9, flank * 36), options: [.drawsBeforeStartingLocation, .drawsAfterEndingLocation])
+            NSGraphicsContext.restoreGraphicsState()
+            bit.lineWidth = 1
+            steelDark.setStroke()
+            bit.stroke()
+            let edge = NSBezierPath()
+            edge.move(to: at(0.75, flank * 25.5))
+            edge.curve(to: at(1.05, flank * 25.5), controlPoint1: at(0.82, flank * 38), controlPoint2: at(1.0, flank * 38))
+            edge.lineWidth = 1.4
+            NSColor.white.withAlphaComponent(isWhirling ? 1 : 0.75).setStroke()
+            edge.stroke()
+        }
+        steelDark.setFill()
+        circle(at(0.9, 0), 4.5).fill()
+        steel.setFill()
+        circle(at(0.9, 0), 2.5).fill()
+        woodDark.setFill()
+        circle(handle, 4.5).fill()
     }
 
     func drawKatana() {
@@ -2177,6 +2294,7 @@ extension BoinkView {
         case .katana: drawKatana()
         case .saber: drawSaber()
         case .fish: drawFish()
+        case .axe: drawAxe()
         }
         (handleAt, angle) = pose
 
@@ -2290,6 +2408,7 @@ extension BoinkView {
             let level = min(3, Int(me.boinkPower.rounded()))
             let words = lastHitWasSlice ? ["SLICE!", "SLIIICE!!", "SLIIIIIICE!!!", "MEGA SLICE!!!"]
                 : hitWeapon == .fish ? ["SLAP!", "SLAAP!!", "SLAAAAP!!!", "MEGA SLAP!!!"]
+                : hitWeapon == .axe ? ["CHOP!", "CHOOP!!", "CHOOOOP!!!", "MEGA CHOP!!!"]
                 : ["BOINK!", "BOOINK!!", "BOOOOINK!!!", "MEGA BOINK!!!"]
             let colors: [NSColor] = [.systemOrange, .systemOrange, .systemRed, .systemPurple]
             let shake = level >= 2 ? sin(sinceBoink * 60) * 4 * (1 - fade) : 0
@@ -2622,6 +2741,28 @@ if let path = argument(after: "--saber") {
     }
     print("saber: slices \(view.slices), seared by saber \(view.cutWeapon == .saber)")
     exit(0)
+}
+
+if let path = argument(after: "--axe") {
+    let view = batView()
+    view.arm(.axe)
+    let center = CGPoint(x: view.bounds.midX, y: groundHeight + 230)
+    view.handleAt = center
+    view.grab(.handle, at: view.handle)
+    var topSpin: CGFloat = 0
+    var whirlFrames = 0
+    var saved = false
+    for frame in 0..<240 {
+        let turn = CGFloat(frame) * 0.2
+        view.heldAt = CGPoint(x: center.x + cos(turn) * 100, y: center.y + sin(turn) * 100)
+        view.step()
+        topSpin = max(topSpin, abs(view.spin))
+        if view.isWhirling { whirlFrames += 1 }
+        if !saved && view.isWhirling && view.boinks > 0 { save(view, to: path); saved = true }
+    }
+    if !saved { save(view, to: path) }
+    print("axe: top spin \(Int(topSpin)), whirling \(whirlFrames) frames, chops \(view.boinks), slimes \(view.blobs.count), score \(view.score)")
+    exit(whirlFrames > 0 && view.boinks > 0 ? 0 : 1)
 }
 
 if let path = argument(after: "--juggle") {
