@@ -447,7 +447,7 @@ final class BoinkView: NSView {
 
     func isOverToggle(_ point: CGPoint) -> Bool { toggleFrame.contains(point) || vibeFrame.contains(point) }
 
-    var vibeSeat: CGPoint { CGPoint(x: 90, y: ground) }
+    var vibeSeat: CGPoint { CGPoint(x: bounds.maxX - 90, y: ground) }
 
     func isOverVibingPenguin(_ point: CGPoint) -> Bool { isNear(point, CGPoint(x: vibeSeat.x, y: vibeSeat.y + 22), 36) }
 
@@ -2161,6 +2161,13 @@ extension BoinkView {
         let shellColor = NSColor(calibratedRed: 0.13, green: 0.14, blue: 0.2, alpha: 1)
         let orange = NSColor(calibratedRed: 1, green: 0.62, blue: 0.15, alpha: 1)
 
+        // The scene is drawn facing right, then mirrored so the penguin looks back at the screen from the right corner.
+        NSGraphicsContext.saveGraphicsState()
+        let mirror = NSAffineTransform()
+        mirror.translateX(by: seat.x * 2, yBy: 0)
+        mirror.scaleX(by: -1, yBy: 1)
+        mirror.concat()
+
         let pose = (handleAt, angle)
         let lean: CGFloat = -0.3
         handleAt = CGPoint(x: seat.x - 34 - weapon.length * sin(lean), y: seat.y + weapon.length * cos(lean))
@@ -2253,11 +2260,14 @@ extension BoinkView {
             circle(puff, 3 + t * 16).fill()
         }
 
+        NSGraphicsContext.restoreGraphicsState()
+
         let hint: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .bold),
             .foregroundColor: NSColor.white.withAlphaComponent(0.55),
         ]
-        ("~ vibing · F3 ~" as NSString).draw(at: CGPoint(x: seat.x - 34, y: seat.y - 22), withAttributes: hint)
+        let caption = "~ vibing · F3 ~" as NSString
+        caption.draw(at: CGPoint(x: seat.x - caption.size(withAttributes: hint).width / 2, y: seat.y - 22), withAttributes: hint)
     }
 
     func drawGameOver() {
