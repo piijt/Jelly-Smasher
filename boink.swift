@@ -1,7 +1,7 @@
 import AppKit
 import Carbon
 
-let isTrial = CommandLine.arguments.dropFirst().contains { $0.hasPrefix("--") }
+let isTrial = CommandLine.arguments.dropFirst().contains { $0.hasPrefix("--") && $0 != "--no-shake" }
 let screenArea = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 // Trials keep a fixed stage so their numbers stay comparable; the game fills most of the screen.
 let windowSize = isTrial ? NSSize(width: 900, height: 560) : NSSize(width: screenArea.width - 20, height: screenArea.height - 20)
@@ -384,6 +384,10 @@ final class BoinkView: NSView {
 
     var isVibing = false
 
+    var blowsBubbles = isTrial || UserDefaults.standard.object(forKey: "vibeBubbles") as? Bool ?? true
+
+    var shakesScreen = !CommandLine.arguments.contains("--no-shake") && (isTrial || UserDefaults.standard.object(forKey: "screenShake") as? Bool ?? true)
+
     var vibeClock: CGFloat = 0
 
     var isAirborne: Bool { me.isAirborne }
@@ -457,6 +461,17 @@ final class BoinkView: NSView {
 
     func isOverVibingPenguin(_ point: CGPoint) -> Bool { isNear(point, CGPoint(x: vibeSeat.x, y: vibeSeat.y + 22), 36) }
 
+    @objc func pickVibe(_ item: NSMenuItem) {
+        blowsBubbles = item.tag == 1
+        UserDefaults.standard.set(blowsBubbles, forKey: "vibeBubbles")
+        needsDisplay = true
+    }
+
+    @objc func toggleShake() {
+        shakesScreen.toggle()
+        UserDefaults.standard.set(shakesScreen, forKey: "screenShake")
+    }
+
     @objc func toggleVibe() {
         guard !isGameOver else { return }
         isVibing.toggle()
@@ -515,6 +530,15 @@ final class BoinkView: NSView {
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: isVibing ? "Back to smashing (F3)" : "Vibe (F3)", action: #selector(toggleVibe), keyEquivalent: "").target = self
+        for (title, bubbles) in [("🫧 Soap bubbles", true), ("🚬 Smoke break", false)] {
+            let item = menu.addItem(withTitle: "    " + title, action: #selector(pickVibe(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = bubbles ? 1 : 0
+            item.state = blowsBubbles == bubbles ? .on : .off
+        }
+        let shaking = menu.addItem(withTitle: "Screen shake", action: #selector(toggleShake), keyEquivalent: "")
+        shaking.target = self
+        shaking.state = shakesScreen ? .on : .off
         menu.addItem(withTitle: "Reset", action: #selector(reset), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Quit Boink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         NSMenu.popUpContextMenu(menu, with: event, for: self)
@@ -1149,7 +1173,8 @@ final class BoinkView: NSView {
         }
         NSGraphicsContext.saveGraphicsState()
         let jolt = NSAffineTransform()
-        jolt.translateX(by: sin(clock * 97) * shake, yBy: cos(clock * 89) * shake * 0.6)
+        let jitter = shakesScreen ? shake : 0
+        jolt.translateX(by: sin(clock * 97) * jitter, yBy: cos(clock * 89) * jitter * 0.6)
         jolt.concat()
         drawWorld()
         NSGraphicsContext.restoreGraphicsState()
@@ -2314,6 +2339,22 @@ extension BoinkView {
         NSBezierPath(ovalIn: NSRect(x: body.x - 13, y: body.y - 18, width: 28, height: 30 + breath)).fill()
 
         let face = CGPoint(x: body.x + 4, y: body.y + 8 + breath)
+        if blowsBubbles {
+            drawBubbleBreak(body: body, face: face, shellColor: shellColor, orange: orange)
+        } else {
+            drawSmokeBreak(body: body, face: face, shellColor: shellColor, orange: orange)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+
+        let hint: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.55),
+        ]
+        let caption = "~ vibing · F3 ~" as NSString
+        caption.draw(at: CGPoint(x: seat.x - caption.size(withAttributes: hint).width / 2, y: seat.y - 22), withAttributes: hint)
+    }
+
+    func drawSmokeBreak(body: CGPoint, face: CGPoint, shellColor: NSColor, orange: NSColor) {
         // A slow drag every few seconds: the ember flares and the eyes close for a moment.
         let drag = max(0, sin(vibeClock * 1.4)) > 0.92
         for side: CGFloat in [-1, 1] {
@@ -2378,14 +2419,91 @@ extension BoinkView {
             circle(puff, 3 + t * 16).fill()
         }
 
-        NSGraphicsContext.restoreGraphicsState()
+    }
 
-        let hint: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .bold),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.55),
-        ]
-        let caption = "~ vibing · F3 ~" as NSString
-        caption.draw(at: CGPoint(x: seat.x - caption.size(withAttributes: hint).width / 2, y: seat.y - 22), withAttributes: hint)
+    func drawBubbleBreak(body: CGPoint, face: CGPoint, shellColor: NSColor, orange: NSColor) {
+        for side: CGFloat in [-1, 1] {
+            let eye = CGPoint(x: face.x + side * 6.5, y: face.y + 1)
+            NSColor.white.setFill()
+            circle(eye, 8).fill()
+            let happy = NSBezierPath()
+            happy.appendArc(withCenter: CGPoint(x: eye.x, y: eye.y - 1.5), radius: 3.5, startAngle: 20, endAngle: 160)
+            happy.lineWidth = 2
+            NSColor.black.setStroke()
+            happy.stroke()
+        }
+        NSColor.systemPink.withAlphaComponent(0.35).setFill()
+        circle(CGPoint(x: face.x + 12, y: face.y - 6), 3).fill()
+
+        let beak = NSBezierPath()
+        beak.move(to: CGPoint(x: face.x - 1, y: face.y - 5))
+        beak.line(to: CGPoint(x: face.x + 8, y: face.y - 7))
+        beak.line(to: CGPoint(x: face.x + 5, y: face.y - 9))
+        beak.close()
+        orange.setFill()
+        beak.fill()
+
+        // Each blow fills the wand film and then lets a bubble go.
+        let blow = (vibeClock * 0.8).truncatingRemainder(dividingBy: 1)
+        let ring = CGPoint(x: face.x + 20, y: face.y - 2 + sin(vibeClock * 2) * 1.5)
+        let wand = NSBezierPath()
+        wand.move(to: CGPoint(x: body.x + 18, y: body.y - 6))
+        wand.line(to: CGPoint(x: ring.x - 2, y: ring.y - 7))
+        wand.lineWidth = 2
+        wand.lineCapStyle = .round
+        NSColor.systemPink.setStroke()
+        wand.stroke()
+        NSColor(calibratedRed: 0.7, green: 0.9, blue: 1, alpha: 0.2 + 0.25 * blow).setFill()
+        circle(ring, 7).fill()
+        let loop = circle(ring, 7)
+        loop.lineWidth = 2
+        NSColor.systemPink.setStroke()
+        loop.stroke()
+
+        let flipper = NSBezierPath()
+        flipper.move(to: CGPoint(x: body.x + 12, y: body.y + 2))
+        flipper.curve(to: CGPoint(x: body.x + 19, y: body.y - 5), controlPoint1: CGPoint(x: body.x + 22, y: body.y + 2), controlPoint2: CGPoint(x: body.x + 20, y: body.y - 2))
+        flipper.lineWidth = 6
+        flipper.lineCapStyle = .round
+        shellColor.setStroke()
+        flipper.stroke()
+
+        let count = 9
+        for i in 0..<count {
+            let phase = vibeClock * 0.16 + CGFloat(i) / CGFloat(count)
+            let t = phase.truncatingRemainder(dividingBy: 1)
+            let seed = CGFloat(i * 7) + floor(phase) * 13
+            func chance(_ salt: CGFloat) -> CGFloat { abs(sin((seed + salt) * 12.9898) * 43758.5453).truncatingRemainder(dividingBy: 1) }
+            let size = (5 + chance(1) * 10) * min(1, t * 8)
+            let lifespan = 0.75 + 0.25 * chance(2)
+            guard t < lifespan else { continue }
+            let spot = CGPoint(x: ring.x + 8 + t * (60 + chance(3) * 120) + sin(t * 9 + seed) * 10,
+                               y: ring.y + t * (150 + chance(4) * 120) + sin(t * 5 + seed) * 6)
+            if lifespan - t < 0.04 {
+                let pop = NSBezierPath()
+                for k in 0..<6 {
+                    let a = CGFloat(k) * .pi / 3
+                    pop.move(to: CGPoint(x: spot.x + cos(a) * size * 0.8, y: spot.y + sin(a) * size * 0.8))
+                    pop.line(to: CGPoint(x: spot.x + cos(a) * size * 1.3, y: spot.y + sin(a) * size * 1.3))
+                }
+                pop.lineWidth = 1.2
+                NSColor.white.withAlphaComponent(0.6).setStroke()
+                pop.stroke()
+                continue
+            }
+            NSColor.white.withAlphaComponent(0.07).setFill()
+            circle(spot, size).fill()
+            let film = circle(spot, size)
+            film.lineWidth = 1.3
+            NSColor(calibratedHue: (chance(5) + t * 0.6).truncatingRemainder(dividingBy: 1), saturation: 0.45, brightness: 1, alpha: 0.7).setStroke()
+            film.stroke()
+            let shine = NSBezierPath()
+            shine.appendArc(withCenter: spot, radius: size * 0.65, startAngle: 100, endAngle: 150)
+            shine.lineWidth = 1.5
+            shine.lineCapStyle = .round
+            NSColor.white.withAlphaComponent(0.8).setStroke()
+            shine.stroke()
+        }
     }
 
     func drawGameOver() {
@@ -2509,7 +2627,7 @@ extension BoinkView {
 
         NSColor.black.withAlphaComponent(0.45).setFill()
         NSBezierPath(roundedRect: vibeFrame, xRadius: 13, yRadius: 13).fill()
-        let vibe = "🚬 vibe" as NSString
+        let vibe = (blowsBubbles ? "🫧 vibe" : "🚬 vibe") as NSString
         vibe.draw(at: CGPoint(x: vibeFrame.midX - vibe.size(withAttributes: option).width / 2, y: vibeFrame.minY + 5), withAttributes: option)
 
     }
@@ -2851,6 +2969,8 @@ if let path = argument(after: "--vibe") {
     view.toggleVibe()
     for _ in 0..<200 { view.vibeClock += tick }
     save(view, to: path)
+    view.blowsBubbles = false
+    save(view, to: path + "-smoke.png")
     view.toggleVibe()
     print("vibe keeps clock \(view.clock == frozen.0), time left \(view.timeLeft == frozen.1)")
     exit(view.clock == frozen.0 && !view.isVibing ? 0 : 1)

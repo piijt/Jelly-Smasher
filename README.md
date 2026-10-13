@@ -23,7 +23,8 @@ That's exactly one level of Jelly-Smasher.
 - 🪟 **Lives on top of your desktop.** It's a transparent, always-on-top overlay. Everything except the penguin and its weapon is click-through, so your terminal and editor keep working underneath.
 - ⚡ **Zero setup.** It's one Swift file with no dependencies. Compile it and play.
 - ⏱️ **10-second levels.** Clear the screen before the clock runs out, then get back to reviewing that diff.
-- 🚬 **Vibe mode.** Hit `F3` (or the 🚬 vibe button) and the game freezes. The slimes vanish and the penguin sits down in the corner for a smoke, its weapon leaning behind it, until you're ready again.
+- 🫧 **Vibe mode.** Hit `F3` (or the vibe button) and the game freezes. The slimes vanish and the penguin sits down in the corner, weapon leaning behind it, and blows soap bubbles until you're ready again. Prefer a smoke break? Switch it in the right-click menu.
+- 🧘 **Calm mode.** Launch with `./boink --no-shake`, or untick *Screen shake* in the right-click menu (remembered), for all the juice without the screen jumping around.
 
 <div align="center"><img src="assets/vibe.png" width="420" alt="Vibe mode"></div>
 
@@ -70,7 +71,9 @@ swiftc -O boink.swift -o boink
 | Swing | Grab the penguin or the weapon and fling it around |
 | Switch weapon | Click the weapon bar, or right-click the penguin |
 | Move the whole game | ⌥ Option-drag |
-| Vibe / pause | `F3` from any app, the 🚬 vibe button, or right-click → Vibe. Click the lounging penguin to get back up |
+| Vibe / pause | `F3` from any app, the vibe button, or right-click → Vibe. Click the lounging penguin to get back up |
+| Vibe style | Right-click → 🫧 Soap bubbles / 🚬 Smoke break |
+| Screen shake | Right-click → Screen shake, or launch with `./boink --no-shake` |
 | Restart | Click anywhere after game over, double-click the penguin, or right-click → Reset |
 | Quit | Right-click → Quit Boink |
 
