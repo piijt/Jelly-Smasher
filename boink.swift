@@ -380,7 +380,9 @@ final class BoinkView: NSView {
 
     var canRestart: Bool { isGameOver && age(gameOverAt) > 0.8 }
 
-    var isPaused = false
+    var isVibing = false
+
+    var vibeClock: CGFloat = 0
 
     var isAirborne: Bool { me.isAirborne }
 
@@ -441,7 +443,20 @@ final class BoinkView: NSView {
 
     var toggleFrame: NSRect { NSRect(x: 16, y: bounds.maxY - 116, width: 430, height: 26) }
 
-    func isOverToggle(_ point: CGPoint) -> Bool { toggleFrame.contains(point) }
+    var vibeFrame: NSRect { NSRect(x: toggleFrame.maxX + 8, y: toggleFrame.minY, width: 84, height: toggleFrame.height) }
+
+    func isOverToggle(_ point: CGPoint) -> Bool { toggleFrame.contains(point) || vibeFrame.contains(point) }
+
+    var vibeSeat: CGPoint { CGPoint(x: 90, y: ground) }
+
+    func isOverVibingPenguin(_ point: CGPoint) -> Bool { isNear(point, CGPoint(x: vibeSeat.x, y: vibeSeat.y + 22), 36) }
+
+    @objc func toggleVibe() {
+        guard !isGameOver else { return }
+        isVibing.toggle()
+        held = nil
+        needsDisplay = true
+    }
 
     @objc func pickWeapon(_ item: NSMenuItem) { arm(Weapon.all[item.tag]) }
 
@@ -454,8 +469,16 @@ final class BoinkView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if isVibing {
+            if isOverVibingPenguin(point) { toggleVibe() }
+            return
+        }
         if canRestart {
             reset()
+            return
+        }
+        if vibeFrame.contains(point) {
+            toggleVibe()
             return
         }
         if isOverToggle(point) {
@@ -485,6 +508,7 @@ final class BoinkView: NSView {
             item.state = choice == weapon ? .on : .off
         }
         menu.addItem(.separator())
+        menu.addItem(withTitle: isVibing ? "Back to smashing (F3)" : "Vibe (F3)", action: #selector(toggleVibe), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Reset", action: #selector(reset), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Quit Boink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         NSMenu.popUpContextMenu(menu, with: event, for: self)
@@ -1095,6 +1119,10 @@ final class BoinkView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if isVibing {
+            drawVibe()
+            return
+        }
         NSGraphicsContext.saveGraphicsState()
         let jolt = NSAffineTransform()
         jolt.translateX(by: sin(clock * 97) * shake, yBy: cos(clock * 89) * shake * 0.6)
@@ -1104,7 +1132,6 @@ final class BoinkView: NSView {
         drawBanner()
         drawScore()
         drawGameOver()
-        drawPaused()
     }
 
     func drawWorld() {
@@ -2129,13 +2156,108 @@ extension BoinkView {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    func drawPaused() {
-        guard isPaused else { return }
-        NSColor.black.withAlphaComponent(0.35).setFill()
-        bounds.fill()
-        let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        drawText("PAUSED", at: CGPoint(x: center.x, y: center.y + 20), size: 64, color: .white, within: bounds.width)
-        drawText("press F3 to resume", at: CGPoint(x: center.x, y: center.y - 30), size: 16, color: NSColor.white.withAlphaComponent(0.8), weight: .bold, within: bounds.width)
+    func drawVibe() {
+        let seat = vibeSeat
+        let shellColor = NSColor(calibratedRed: 0.13, green: 0.14, blue: 0.2, alpha: 1)
+        let orange = NSColor(calibratedRed: 1, green: 0.62, blue: 0.15, alpha: 1)
+
+        let pose = (handleAt, angle)
+        let lean: CGFloat = -0.3
+        handleAt = CGPoint(x: seat.x - 34 - weapon.length * sin(lean), y: seat.y + weapon.length * cos(lean))
+        angle = lean
+        switch weapon {
+        case .bat: drawBat()
+        case .katana: drawKatana()
+        case .saber: drawSaber()
+        case .fish: drawFish()
+        }
+        (handleAt, angle) = pose
+
+        NSColor.black.withAlphaComponent(0.25).setFill()
+        NSBezierPath(ovalIn: NSRect(x: seat.x - 28, y: seat.y - 5, width: 62, height: 10)).fill()
+
+        orange.setFill()
+        for side: CGFloat in [0, 1] {
+            NSBezierPath(ovalIn: NSRect(x: seat.x + 10 + side * 6, y: seat.y - 2 + side * 3, width: 18, height: 7)).fill()
+        }
+
+        let breath = sin(vibeClock * 1.6) * 0.8
+        let body = CGPoint(x: seat.x, y: seat.y + 21)
+        shellColor.setFill()
+        NSBezierPath(ovalIn: NSRect(x: body.x - 21, y: body.y - 21, width: 42, height: 42 + breath)).fill()
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: NSRect(x: body.x - 13, y: body.y - 18, width: 28, height: 30 + breath)).fill()
+
+        let face = CGPoint(x: body.x + 4, y: body.y + 8 + breath)
+        // A slow drag every few seconds: the ember flares and the eyes close for a moment.
+        let drag = max(0, sin(vibeClock * 1.4)) > 0.92
+        for side: CGFloat in [-1, 1] {
+            let eye = CGPoint(x: face.x + side * 6.5, y: face.y + 1)
+            NSColor.white.setFill()
+            circle(eye, 8).fill()
+            if drag {
+                let shut = NSBezierPath()
+                shut.appendArc(withCenter: CGPoint(x: eye.x, y: eye.y + 1.5), radius: 3.5, startAngle: 200, endAngle: 340)
+                shut.lineWidth = 2
+                NSColor.black.setStroke()
+                shut.stroke()
+            } else {
+                NSColor.black.setFill()
+                circle(CGPoint(x: eye.x + 1, y: eye.y - 1), 3.2).fill()
+                shellColor.setFill()
+                NSBezierPath(rect: NSRect(x: eye.x - 4.2, y: eye.y - 0.2, width: 8.4, height: 4.4)).fill()
+            }
+        }
+
+        let beak = NSBezierPath()
+        beak.move(to: CGPoint(x: face.x - 1, y: face.y - 5))
+        beak.line(to: CGPoint(x: face.x + 8, y: face.y - 7))
+        beak.line(to: CGPoint(x: face.x + 5, y: face.y - 9))
+        beak.close()
+        orange.setFill()
+        beak.fill()
+
+        let lip = CGPoint(x: face.x + 7, y: face.y - 7.5)
+        let ember = CGPoint(x: lip.x + 15, y: lip.y + 3)
+        let cigarette = NSBezierPath()
+        cigarette.move(to: lip)
+        cigarette.line(to: ember)
+        cigarette.lineWidth = 3
+        cigarette.lineCapStyle = .round
+        NSColor(calibratedWhite: 0.96, alpha: 1).setStroke()
+        cigarette.stroke()
+        let filter = NSBezierPath()
+        filter.move(to: lip)
+        filter.line(to: CGPoint(x: lip.x + 4, y: lip.y + 0.8))
+        filter.lineWidth = 3
+        orange.withAlphaComponent(0.8).setStroke()
+        filter.stroke()
+        let glow = drag ? 1 : 0.55 + 0.15 * sin(vibeClock * 5)
+        NSColor.systemOrange.withAlphaComponent(0.35 * glow).setFill()
+        circle(ember, 4.5).fill()
+        NSColor(calibratedRed: 1, green: 0.3 + 0.3 * glow, blue: 0.1, alpha: 1).setFill()
+        circle(ember, 1.8).fill()
+
+        let flipper = NSBezierPath()
+        flipper.move(to: CGPoint(x: body.x + 12, y: body.y + 2))
+        flipper.curve(to: CGPoint(x: lip.x + 6, y: lip.y - 2), controlPoint1: CGPoint(x: body.x + 26, y: body.y - 4), controlPoint2: CGPoint(x: lip.x + 8, y: lip.y - 10))
+        flipper.lineWidth = 6
+        flipper.lineCapStyle = .round
+        shellColor.setStroke()
+        flipper.stroke()
+
+        for i in 0..<7 {
+            let t = (vibeClock * 0.3 + CGFloat(i) / 7).truncatingRemainder(dividingBy: 1)
+            let puff = CGPoint(x: ember.x + t * 30 + sin(t * 7 + CGFloat(i)) * 8, y: ember.y + 4 + t * 130)
+            NSColor(calibratedWhite: 0.85, alpha: 0.35 * (1 - t)).setFill()
+            circle(puff, 3 + t * 16).fill()
+        }
+
+        let hint: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.55),
+        ]
+        ("~ vibing · F3 ~" as NSString).draw(at: CGPoint(x: seat.x - 34, y: seat.y - 22), withAttributes: hint)
     }
 
     func drawGameOver() {
@@ -2256,6 +2378,11 @@ extension BoinkView {
             label.draw(at: CGPoint(x: toggle.minX + slot * (CGFloat(choice.index) + 0.5) - width / 2, y: toggle.minY + 5), withAttributes: option)
         }
 
+        NSColor.black.withAlphaComponent(0.45).setFill()
+        NSBezierPath(roundedRect: vibeFrame, xRadius: 13, yRadius: 13).fill()
+        let vibe = "🚬 vibe" as NSString
+        vibe.draw(at: CGPoint(x: vibeFrame.midX - vibe.size(withAttributes: option).width / 2, y: vibeFrame.minY + 5), withAttributes: option)
+
     }
 
 }
@@ -2289,28 +2416,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func registerPauseKey() {
         var pressed = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, _, delegate in
-            Unmanaged<AppDelegate>.fromOpaque(delegate!).takeUnretainedValue().togglePause()
+            Unmanaged<AppDelegate>.fromOpaque(delegate!).takeUnretainedValue().view.toggleVibe()
             return noErr
         }, 1, &pressed, Unmanaged.passUnretained(self).toOpaque(), nil)
         var hotKey: EventHotKeyRef?
         RegisterEventHotKey(UInt32(kVK_F3), 0, EventHotKeyID(signature: OSType(0x626F696E), id: 1), GetApplicationEventTarget(), 0, &hotKey)
     }
 
-    func togglePause() {
-        guard !view.isGameOver else { return }
-        view.isPaused.toggle()
-        view.held = nil
-        view.needsDisplay = true
-    }
-
     // The window is transparent; clicks fall through to the terminal unless the pointer is on the bat.
     func frame() {
-        if view.isPaused {
-            panel.ignoresMouseEvents = true
+        let point = view.convert(panel.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        if view.isVibing {
+            view.vibeClock += tick
+            view.needsDisplay = true
+            panel.ignoresMouseEvents = !view.isOverVibingPenguin(point)
             return
         }
         view.step()
-        let point = view.convert(panel.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
         panel.ignoresMouseEvents = !(view.canRestart || view.held != nil || view.grip(at: point) != nil || view.isOverToggle(point))
     }
 }
@@ -2569,6 +2691,18 @@ if let path = argument(after: "--fish") {
     }
     print("fish: slaps \(view.boinks), word \(view.hitWeapon.hit)")
     exit(0)
+}
+
+if let path = argument(after: "--vibe") {
+    let view = BoinkView(frame: NSRect(origin: .zero, size: windowSize))
+    for _ in 0..<120 { view.step() }
+    let frozen = (view.clock, view.timeLeft)
+    view.toggleVibe()
+    for _ in 0..<200 { view.vibeClock += tick }
+    save(view, to: path)
+    view.toggleVibe()
+    print("vibe keeps clock \(view.clock == frozen.0), time left \(view.timeLeft == frozen.1)")
+    exit(view.clock == frozen.0 && !view.isVibing ? 0 : 1)
 }
 
 if let path = argument(after: "--stress") {
