@@ -447,7 +447,7 @@ final class BoinkView: NSView {
 
     func isOverToggle(_ point: CGPoint) -> Bool { toggleFrame.contains(point) || vibeFrame.contains(point) }
 
-    var vibeSeat: CGPoint { CGPoint(x: bounds.maxX - 90, y: ground) }
+    var vibeSeat: CGPoint { CGPoint(x: bounds.maxX - 70, y: bounds.minY + 30) }
 
     func isOverVibingPenguin(_ point: CGPoint) -> Bool { isNear(point, CGPoint(x: vibeSeat.x, y: vibeSeat.y + 22), 36) }
 
