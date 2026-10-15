@@ -1,7 +1,10 @@
 import AppKit
 import Carbon
 
-let isTrial = CommandLine.arguments.dropFirst().contains { $0.hasPrefix("--") && $0 != "--no-shake" }
+let isTrial = CommandLine.arguments.dropFirst().contains { $0.hasPrefix("--") && $0 != "--no-shake" && $0 != "--dev" }
+// Dev mode: endless gold, a level picker in the shop, and `--dev N` starts at level N. Its scores never count as a best.
+let isDev = CommandLine.arguments.contains("--dev")
+let devGold = 999_999
 let screenArea = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 // Trials keep a fixed stage so their numbers stay comparable; the game fills most of the screen.
 let windowSize = isTrial ? NSSize(width: 900, height: 560) : NSSize(width: screenArea.width - 20, height: screenArea.height - 20)
@@ -21,7 +24,9 @@ struct Burst {
     var color = NSColor.systemYellow
 }
 
-let saberGlow = NSColor(calibratedRed: 1, green: 0.16, blue: 0.14, alpha: 1)
+let saberGlows = [NSColor(calibratedRed: 1, green: 0.16, blue: 0.14, alpha: 1),
+                  NSColor(calibratedRed: 0.2, green: 0.5, blue: 1, alpha: 1),
+                  NSColor(calibratedRed: 0.72, green: 0.25, blue: 1, alpha: 1)]
 
 enum Weapon {
     case bat, katana, saber, fish, axe
@@ -50,6 +55,19 @@ enum Weapon {
 
     var price: Int { [0, 40, 90, 25, 60][index] }
 
+    var tierNames: [String] {
+        [["Wooden bat", "Aluminium bat", "Nail bat"],
+         ["Katana", "Tamahagane katana", "Muramasa"],
+         ["Red saber", "Blue saber", "Purple saber"],
+         ["Herring", "Salmon", "Swordfish"],
+         ["Hatchet", "Battle axe", "Golden axe"]][index]
+    }
+
+    var icon: String { String(label.prefix { $0 != " " }) }
+
+    // Each forge step costs more than the last.
+    func forgePrice(toTier tier: Int) -> Int { Int(CGFloat(max(25, price)) * (tier == 1 ? 0.9 : 2.2)) }
+
     var blurb: String { ["", "fast clean slices", "slices that sear", "a light, slappy smash", "heavy chops and a whirlwind"][index] }
 
     static let all: [Weapon] = [.bat, .katana, .saber, .fish, .axe]
@@ -64,9 +82,10 @@ enum Upgrade: Int, CaseIterable {
 }
 
 let maxRank = 5
+let forgeBoost: CGFloat = 0.1
 
 enum Ware {
-    case weapon(Weapon), upgrade(Upgrade)
+    case weapon(Weapon), forge(Weapon), upgrade(Upgrade)
 }
 
 struct Cut {
@@ -374,9 +393,11 @@ final class BoinkView: NSView {
     var slimeGrip = CGPoint.zero
     var jellyHits = 0
     var weapon = Weapon.bat
-    var gold = 0
+    var gold = isDev ? devGold : 0
+    var nextLevel = 2
     var owned: Set<Weapon> = [.bat]
     var ranks: [Upgrade: Int] = [:]
+    var tiers: [Weapon: Int] = [:]
     var isShopping = false
     var countdownAt: CGFloat = -1000
     var upcoming = 1
@@ -435,6 +456,8 @@ final class BoinkView: NSView {
     var timeLeft: CGFloat { max(0, levelTime - age(levelAt)) }
 
     func rank(_ upgrade: Upgrade) -> Int { ranks[upgrade, default: 0] }
+
+    func tier(_ choice: Weapon) -> Int { tiers[choice, default: 0] }
 
     var isGameOver: Bool { gameOverAt > -1000 }
 
@@ -563,6 +586,9 @@ final class BoinkView: NSView {
         if isShopping && shopFrame.contains(point) {
             if nextFrame.contains(point) {
                 leaveShop()
+            } else if let pick = devSteps.first(where: { $0.frame.contains(point) }) {
+                nextLevel = max(1, nextLevel + pick.step)
+                NSSound(named: "Tink")?.play()
             } else if let row = wares.indices.first(where: { wareFrame($0).contains(point) }) {
                 buy(wares[row])
             }
@@ -608,6 +634,7 @@ final class BoinkView: NSView {
         let shaking = menu.addItem(withTitle: "Screen shake", action: #selector(toggleShake), keyEquivalent: "")
         shaking.target = self
         shaking.state = shakesScreen ? .on : .off
+        if isDev { menu.addItem(withTitle: "🛠 Open shop", action: #selector(devShop), keyEquivalent: "").target = self }
         menu.addItem(withTitle: "Reset", action: #selector(reset), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Quit Boink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         NSMenu.popUpContextMenu(menu, with: event, for: self)
@@ -681,9 +708,10 @@ final class BoinkView: NSView {
         popups = []
         swoosh = []
         gameOverAt = -1000
-        gold = 0
+        gold = isDev ? devGold : 0
         owned = [.bat]
         ranks = [:]
+        tiers = [:]
         isShopping = false
         weapon = .bat
         countIn(to: 1)
@@ -748,7 +776,7 @@ final class BoinkView: NSView {
         let airBonus = 1 + 0.25 * CGFloat(me.airHits)
         award(Int(CGFloat(hitPoints * combo) * airBonus), at: barrel, color: .systemYellow)
         let isSmash = contact == nil && weapon.isSmash
-        let damage = min(50, 3 * me.impact * me.impact) * airBonus * (1 + 0.1 * CGFloat(combo - 1)) * (weapon == .axe ? chopPower : 1) * (1 + 0.15 * CGFloat(rank(.power)))
+        let damage = min(50, 3 * me.impact * me.impact) * airBonus * (1 + 0.1 * CGFloat(combo - 1)) * (weapon == .axe ? chopPower : 1) * (1 + 0.15 * CGFloat(rank(.power))) * (1 + forgeBoost * CGFloat(tier(weapon)))
         me.health -= damage
         if me.airHits >= 1 {
             popups.append(Popup(text: "AIR x\(me.airHits)", position: CGPoint(x: me.jellyX, y: head.y + 90), born: clock, color: .systemTeal, size: 16 + 2 * CGFloat(min(me.airHits, 6))))
@@ -987,7 +1015,7 @@ final class BoinkView: NSView {
         score += points
         if score > best {
             best = score
-            if !isTrial { UserDefaults.standard.set(best, forKey: "bestScore") }
+            if !isTrial && !isDev { UserDefaults.standard.set(best, forKey: "bestScore") }
         }
         let text = label.isEmpty ? "+\(points)" : "+\(points) \(label)"
         let stacked = CGFloat(popups.count)
@@ -1002,11 +1030,12 @@ final class BoinkView: NSView {
         popups.append(Popup(text: "+\(amount) 🪙", position: CGPoint(x: spot.x, y: spot.y + 34), born: clock, color: .systemYellow, size: 18))
     }
 
-    var wares: [Ware] { Weapon.all.dropFirst().map { .weapon($0) } + Upgrade.allCases.map { .upgrade($0) } }
+    var wares: [Ware] { Weapon.all.map { owned.contains($0) ? .forge($0) : .weapon($0) } + Upgrade.allCases.map { .upgrade($0) } }
 
     func price(_ ware: Ware) -> Int? {
         switch ware {
         case .weapon(let choice): return owned.contains(choice) ? nil : choice.price
+        case .forge(let choice): return tier(choice) + 1 < choice.tierNames.count ? choice.forgePrice(toTier: tier(choice) + 1) : nil
         case .upgrade(let upgrade): return rank(upgrade) >= maxRank ? nil : upgrade.basePrice * (rank(upgrade) + 1)
         }
     }
@@ -1016,20 +1045,47 @@ final class BoinkView: NSView {
             NSSound(named: "Basso")?.play()
             return
         }
-        gold -= cost
+        if !isDev { gold -= cost }
         switch ware {
         case .weapon(let choice):
             owned.insert(choice)
             arm(choice)
+        case .forge(let choice):
+            tiers[choice, default: 0] += 1
+            arm(choice)
+            banner(choice.tierNames[tier(choice)].uppercased() + "!", color: .systemYellow)
         case .upgrade(let upgrade):
             ranks[upgrade, default: 0] += 1
         }
         NSSound(named: "Purr")?.play()
     }
 
+    func openShop() {
+        isShopping = true
+        nextLevel = level + 1
+    }
+
+    @objc func devShop() {
+        blobs = []
+        countdownAt = -1000
+        gameOverAt = -1000
+        openShop()
+    }
+
+    var goldText: String { isDev ? "∞" : "\(gold)" }
+
+    var devSteps: [(frame: NSRect, step: Int)] {
+        guard isDev else { return [] }
+        let size = NSSize(width: 44, height: nextFrame.height)
+        return [(-10, -100), (-1, -52), (1, 8), (10, 56)].map { step, offset in
+            let x = step < 0 ? nextFrame.minX + CGFloat(offset) : nextFrame.maxX + CGFloat(offset)
+            return (NSRect(origin: CGPoint(x: x, y: nextFrame.minY), size: size), step)
+        }
+    }
+
     func leaveShop() {
         isShopping = false
-        countIn(to: level + 1)
+        countIn(to: nextLevel)
     }
 
     var isCountingDown: Bool { countdownAt > -1000 }
@@ -1055,7 +1111,7 @@ final class BoinkView: NSView {
         }
     }
 
-    var shopFrame: NSRect { NSRect(x: bounds.midX - 270, y: bounds.midY - 230, width: 540, height: 430) }
+    var shopFrame: NSRect { NSRect(x: bounds.midX - 270, y: bounds.midY - 230, width: 560, height: 466) }
 
     func wareFrame(_ row: Int) -> NSRect { NSRect(x: shopFrame.minX + 16, y: shopFrame.maxY - 112 - CGFloat(row) * 36, width: shopFrame.width - 32, height: 30) }
 
@@ -1409,7 +1465,7 @@ final class BoinkView: NSView {
             if isCountingDown {
                 countDown()
             } else if blobs.isEmpty {
-                if hadBlobs { clearLevel() } else if age(clearedAt) > 1.6 && !isShopping { isShopping = true }
+                if hadBlobs { clearLevel() } else if age(clearedAt) > 1.6 && !isShopping { openShop() }
             } else if timeLeft <= 0 {
                 timeUp()
             }
@@ -1697,7 +1753,7 @@ extension BoinkView {
             streak.line(to: pair.1)
             streak.lineWidth = weapon == .bat ? 1 + fraction * 7 : 1 + fraction * 3
             streak.lineCapStyle = .round
-            let tint = weapon == .saber ? saberGlow : NSColor.white
+            let tint = weapon == .saber ? saberGlows[tier(.saber)] : NSColor.white
             streak.lineWidth = weapon == .saber ? 2 + fraction * 10 : streak.lineWidth
             tint.withAlphaComponent(fraction * fraction * [0.14, 0.4, 0.55, 0.14, 0.3][weapon.index]).setStroke()
             streak.stroke()
@@ -1733,7 +1789,9 @@ extension BoinkView {
         }
         NSGraphicsContext.saveGraphicsState()
         bat.addClip()
-        NSGradient(colors: [woodDark, wood, wood.blended(withFraction: 0.4, of: .white) ?? wood, wood, woodDark])?
+        let isMetal = tier(.bat) == 1
+        let (body, edge) = isMetal ? (steel, steelDark) : (wood, woodDark)
+        NSGradient(colors: [edge, body, body.blended(withFraction: isMetal ? 0.7 : 0.4, of: .white) ?? body, body, edge])?
             .draw(from: at(0.5, -width(1)), to: at(0.5, width(1)), options: [.drawsBeforeStartingLocation, .drawsAfterEndingLocation])
         for band in stride(from: CGFloat(0.04), through: 0.26, by: 0.055) {
             let grip = NSBezierPath()
@@ -1745,10 +1803,23 @@ extension BoinkView {
         }
         NSGraphicsContext.restoreGraphicsState()
         bat.lineWidth = 1.2
-        woodDark.setStroke()
+        edge.setStroke()
         bat.stroke()
 
-        woodDark.setFill()
+        if tier(.bat) == 2 {
+            let nails = NSBezierPath()
+            for (i, t) in stride(from: CGFloat(0.62), through: 0.96, by: 0.06).enumerated() {
+                let side: CGFloat = i % 2 == 0 ? 1 : -1
+                nails.move(to: at(t, side * (width(t) - 1)))
+                nails.line(to: at(t + 0.015, side * (width(t) + 7)))
+            }
+            nails.lineWidth = 1.8
+            nails.lineCapStyle = .round
+            steelDark.setStroke()
+            nails.stroke()
+        }
+
+        edge.setFill()
         circle(handle, 5.5).fill()
     }
 
@@ -1786,24 +1857,28 @@ extension BoinkView {
             grip.stroke()
         }
 
-        for flank: CGFloat in [-1, 1] {
+        let grade = tier(.axe)
+        let reach: CGFloat = [0.85, 1, 1.18][grade]
+        let gold = NSColor(calibratedRed: 0.98, green: 0.8, blue: 0.3, alpha: 1)
+        let (metal, metalDark) = grade == 2 ? (gold, brass) : (steel, steelDark)
+        for flank: CGFloat in grade == 0 ? [1] : [-1, 1] {
             let bit = NSBezierPath()
             bit.move(to: at(0.84, flank * 3))
-            bit.line(to: at(0.74, flank * 27))
-            bit.curve(to: at(1.06, flank * 27), controlPoint1: at(0.82, flank * 40), controlPoint2: at(1.0, flank * 40))
+            bit.line(to: at(0.74, flank * 27 * reach))
+            bit.curve(to: at(1.06, flank * 27 * reach), controlPoint1: at(0.82, flank * 40 * reach), controlPoint2: at(1.0, flank * 40 * reach))
             bit.line(to: at(0.96, flank * 3))
             bit.close()
             NSGraphicsContext.saveGraphicsState()
             bit.addClip()
-            NSGradient(colors: [steelDark, steel, .white, steel])?
-                .draw(from: at(0.9, 0), to: at(0.9, flank * 36), options: [.drawsBeforeStartingLocation, .drawsAfterEndingLocation])
+            NSGradient(colors: [metalDark, metal, .white, metal])?
+                .draw(from: at(0.9, 0), to: at(0.9, flank * 36 * reach), options: [.drawsBeforeStartingLocation, .drawsAfterEndingLocation])
             NSGraphicsContext.restoreGraphicsState()
             bit.lineWidth = 1
-            steelDark.setStroke()
+            metalDark.setStroke()
             bit.stroke()
             let edge = NSBezierPath()
-            edge.move(to: at(0.75, flank * 25.5))
-            edge.curve(to: at(1.05, flank * 25.5), controlPoint1: at(0.82, flank * 38), controlPoint2: at(1.0, flank * 38))
+            edge.move(to: at(0.75, flank * 25.5 * reach))
+            edge.curve(to: at(1.05, flank * 25.5 * reach), controlPoint1: at(0.82, flank * 38 * reach), controlPoint2: at(1.0, flank * 38 * reach))
             edge.lineWidth = 1.4
             NSColor.white.withAlphaComponent(isWhirling ? 1 : 0.75).setStroke()
             edge.stroke()
@@ -1851,9 +1926,14 @@ extension BoinkView {
             blade.line(to: at(t, curve(t) - width(t) / 2))
         }
         blade.close()
+        if tier(.katana) == 2 {
+            blade.lineWidth = 7 + sin(clock * 6) * 1.5
+            NSColor(calibratedRed: 0.8, green: 0.05, blue: 0.15, alpha: 0.45).setStroke()
+            blade.stroke()
+        }
         NSGraphicsContext.saveGraphicsState()
         blade.addClip()
-        NSGradient(colors: [steelDark, steel, .white, steel])?
+        NSGradient(colors: tier(.katana) == 2 ? [NSColor(calibratedWhite: 0.15, alpha: 1), steelDark, steel, steelDark] : [steelDark, steel, .white, steel])?
             .draw(from: at(0.6, 6), to: at(0.6, -4), options: [.drawsBeforeStartingLocation, .drawsAfterEndingLocation])
         let hamon = NSBezierPath()
         for i in 0...samples {
@@ -1861,8 +1941,8 @@ extension BoinkView {
             let point = at(t, curve(t) - width(t) * 0.15 + sin(t * 60) * 0.6)
             if i == 0 { hamon.move(to: point) } else { hamon.line(to: point) }
         }
-        hamon.lineWidth = 0.8
-        NSColor.white.withAlphaComponent(0.7).setStroke()
+        hamon.lineWidth = tier(.katana) == 0 ? 0.8 : 1.3
+        [NSColor.white.withAlphaComponent(0.7), NSColor.systemCyan.withAlphaComponent(0.9), NSColor.systemRed.withAlphaComponent(0.9)][tier(.katana)].setStroke()
         hamon.stroke()
         let glint = (clock * 0.7).truncatingRemainder(dividingBy: 1)
         NSColor.white.withAlphaComponent(0.9).setFill()
@@ -1922,7 +2002,7 @@ extension BoinkView {
         blade.lineCapStyle = .round
         for (width, alpha) in [(18.0, 0.18), (11.0, 0.35), (6.0, 0.7)] as [(CGFloat, CGFloat)] {
             blade.lineWidth = width * flicker
-            saberGlow.withAlphaComponent(alpha).setStroke()
+            saberGlows[tier(.saber)].withAlphaComponent(alpha).setStroke()
             blade.stroke()
         }
         blade.lineWidth = 3
@@ -1957,27 +2037,48 @@ extension BoinkView {
     // Held by the tail, the fish's body flops back against the swing.
     func drawFish() {
         let (at, _, _) = weaponFrame()
+        let kind = tier(.fish)
+        let girth: CGFloat = [0.75, 1.25, 1.0][kind]
+        let snout: CGFloat = kind == 2 ? 0.8 : 1
         let flop = clamp(-spin * 4, -26, 26) + sin(clock * 9) * 2
         func bend(_ t: CGFloat) -> CGFloat { flop * t * t }
         func width(_ t: CGFloat) -> CGFloat {
             if t < 0.14 { return 4 }
-            return 4 + 12 * sin(.pi * min(1, (t - 0.14) / 0.86) * 0.92)
+            return 4 + 12 * girth * sin(.pi * min(1, (t - 0.14) / (snout - 0.14)) * 0.92)
         }
+        func head(_ f: CGFloat) -> CGFloat { 0.14 + (snout - 0.14) * f }
         let body = NSBezierPath()
         let samples = 26
         body.move(to: at(0.14, bend(0.14) + width(0.14)))
-        for i in 1...samples { let t = 0.14 + 0.86 * CGFloat(i) / CGFloat(samples); body.line(to: at(t, bend(t) + width(t))) }
-        for i in stride(from: samples, through: 0, by: -1) { let t = 0.14 + 0.86 * CGFloat(i) / CGFloat(samples); body.line(to: at(t, bend(t) - width(t))) }
+        for i in 1...samples { let t = head(CGFloat(i) / CGFloat(samples)); body.line(to: at(t, bend(t) + width(t))) }
+        for i in stride(from: samples, through: 0, by: -1) { let t = head(CGFloat(i) / CGFloat(samples)); body.line(to: at(t, bend(t) - width(t))) }
         body.close()
 
+        let fishTop = [NSColor(calibratedRed: 0.35, green: 0.5, blue: 0.68, alpha: 1),
+                       NSColor(calibratedRed: 0.42, green: 0.48, blue: 0.58, alpha: 1),
+                       NSColor(calibratedRed: 0.12, green: 0.22, blue: 0.5, alpha: 1)][kind]
+        let fishBelly = [NSColor(calibratedRed: 0.86, green: 0.9, blue: 0.96, alpha: 1),
+                         NSColor(calibratedRed: 1, green: 0.62, blue: 0.5, alpha: 1),
+                         NSColor(calibratedRed: 0.72, green: 0.78, blue: 0.9, alpha: 1)][kind]
+        let fishLine = fishTop.blended(withFraction: 0.5, of: .black) ?? fishTop
+
+        if kind == 2 {
+            let bill = NSBezierPath()
+            bill.move(to: at(snout - 0.04, bend(snout - 0.04) + 5.5))
+            bill.line(to: at(1.04, bend(1.04)))
+            bill.line(to: at(snout - 0.04, bend(snout - 0.04) - 3))
+            bill.close()
+            NSColor(calibratedRed: 0.3, green: 0.32, blue: 0.4, alpha: 1).setFill()
+            bill.fill()
+        }
+
         let tail = NSBezierPath()
+        let spread = 13 * (kind == 2 ? 1.5 : girth)
         tail.move(to: at(0.16, bend(0.16)))
-        tail.line(to: at(-0.02, bend(0) + 13))
+        tail.line(to: at(-0.02, bend(0) + spread))
         tail.line(to: at(0.04, bend(0.04)))
-        tail.line(to: at(-0.02, bend(0) - 13))
+        tail.line(to: at(-0.02, bend(0) - spread))
         tail.close()
-        let fishTop = NSColor(calibratedRed: 0.25, green: 0.5, blue: 0.9, alpha: 1)
-        let fishBelly = NSColor(calibratedRed: 0.75, green: 0.88, blue: 1, alpha: 1)
         fishTop.setFill()
         tail.fill()
 
@@ -1988,37 +2089,39 @@ extension BoinkView {
         }
         NSGraphicsContext.saveGraphicsState()
         body.addClip()
-        NSGradient(starting: fishTop, ending: fishBelly)?.draw(from: at(0.6, bend(0.6) + 16), to: at(0.6, bend(0.6) - 16), options: [])
-        for t in stride(from: CGFloat(0.3), through: 0.8, by: 0.08) {
+        NSGradient(starting: fishTop, ending: fishBelly)?.draw(from: at(0.6, bend(0.6) + 16 * girth), to: at(0.6, bend(0.6) - 16 * girth), options: [])
+        for t in stride(from: CGFloat(0.3), through: snout - 0.2, by: 0.08) {
             let scale = NSBezierPath()
-            scale.appendArc(withCenter: at(t, bend(t)), radius: 7, startAngle: 0, endAngle: 360)
+            scale.appendArc(withCenter: at(t, bend(t)), radius: 7 * girth, startAngle: 0, endAngle: 360)
             scale.lineWidth = 0.8
             NSColor.white.withAlphaComponent(0.25).setStroke()
             scale.stroke()
         }
         NSGraphicsContext.restoreGraphicsState()
         body.lineWidth = 1.2
-        NSColor(calibratedRed: 0.1, green: 0.25, blue: 0.55, alpha: 1).setStroke()
+        fishLine.setStroke()
         body.stroke()
 
         let fin = NSBezierPath()
-        fin.move(to: at(0.45, bend(0.45) + width(0.45) - 1))
-        fin.line(to: at(0.55, bend(0.55) + width(0.55) + 9))
-        fin.line(to: at(0.68, bend(0.68) + width(0.68) - 1))
+        let crest: CGFloat = kind == 2 ? 20 : 9
+        fin.move(to: at(head(0.36), bend(head(0.36)) + width(head(0.36)) - 1))
+        fin.line(to: at(head(0.45), bend(head(0.45)) + width(head(0.45)) + crest))
+        fin.line(to: at(head(0.63), bend(head(0.63)) + width(head(0.63)) - 1))
         fin.close()
         fishTop.setFill()
         fin.fill()
 
-        let eye = at(0.88, bend(0.88) + 4)
+        let eye = at(head(0.86), bend(head(0.86)) + 4 * girth)
         NSColor.white.setFill()
         circle(eye, 4.2).fill()
         NSColor.black.setFill()
         circle(eye, 2.2).fill()
+        guard kind != 2 else { return }
         let mouth = NSBezierPath()
-        mouth.move(to: at(0.97, bend(0.97) - 1))
-        mouth.line(to: at(0.93, bend(0.93) - 4))
+        mouth.move(to: at(head(0.965), bend(head(0.965)) - 1))
+        mouth.line(to: at(head(0.92), bend(head(0.92)) - 4 * girth))
         mouth.lineWidth = 1.5
-        NSColor(calibratedRed: 0.1, green: 0.25, blue: 0.55, alpha: 1).setStroke()
+        fishLine.setStroke()
         mouth.stroke()
     }
 
@@ -2806,7 +2909,7 @@ extension BoinkView {
         NSColor.black.withAlphaComponent(0.78).setFill()
         NSBezierPath(roundedRect: panel, xRadius: 18, yRadius: 18).fill()
         drawText("SHOP", at: CGPoint(x: panel.midX, y: panel.maxY - 50), size: 32, color: .systemYellow, within: bounds.width)
-        drawText("🪙 \(gold) gold · next up: level \(level + 1)", at: CGPoint(x: panel.midX, y: panel.maxY - 76), size: 14, color: .white, weight: .bold, within: bounds.width)
+        drawText("🪙 \(goldText) gold · next up: level \(nextLevel)", at: CGPoint(x: panel.midX, y: panel.maxY - 76), size: 14, color: .white, weight: .bold, within: bounds.width)
 
         let font = NSFont.systemFont(ofSize: 13, weight: .bold)
         for (row, ware) in wares.enumerated() {
@@ -2819,8 +2922,16 @@ extension BoinkView {
             let note: String
             switch ware {
             case .weapon(let choice):
-                name = "\(choice.label) · \(choice.blurb)"
+                name = "\(choice.icon) \(choice.tierNames[0]) · \(choice.blurb)"
                 note = cost.map { "\($0) 🪙" } ?? "owned ✓"
+            case .forge(let choice):
+                let names = choice.tierNames
+                name = cost == nil ? "\(choice.icon) \(names[tier(choice)]) · fully forged" : "\(choice.icon) \(names[tier(choice)]) → \(names[tier(choice) + 1]) · +10% damage"
+                note = cost.map { "\($0) 🪙" } ?? "maxed ✓"
+                for pip in 0..<names.count {
+                    (pip <= tier(choice) ? NSColor.systemOrange : NSColor.white.withAlphaComponent(0.2)).setFill()
+                    circle(CGPoint(x: frame.maxX - 150 + CGFloat(pip) * 13, y: frame.midY), 4).fill()
+                }
             case .upgrade(let upgrade):
                 name = upgrade.label
                 note = cost.map { "\($0) 🪙" } ?? "maxed ✓"
@@ -2837,10 +2948,17 @@ extension BoinkView {
 
         NSColor.systemGreen.setFill()
         NSBezierPath(roundedRect: nextFrame, xRadius: 18, yRadius: 18).fill()
-        let next = "NEXT LEVEL ▶" as NSString
+        let next = (isDev ? "LEVEL \(nextLevel) ▶" : "NEXT LEVEL ▶") as NSString
         let nextStyle: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 15, weight: .black), .foregroundColor: NSColor.white]
         let size = next.size(withAttributes: nextStyle)
         next.draw(at: CGPoint(x: nextFrame.midX - size.width / 2, y: nextFrame.midY - size.height / 2), withAttributes: nextStyle)
+        for pick in devSteps {
+            NSColor.systemOrange.setFill()
+            NSBezierPath(roundedRect: pick.frame, xRadius: 12, yRadius: 12).fill()
+            let label = (pick.step < 0 ? "−\(-pick.step)" : "+\(pick.step)") as NSString
+            let labelSize = label.size(withAttributes: nextStyle)
+            label.draw(at: CGPoint(x: pick.frame.midX - labelSize.width / 2, y: pick.frame.midY - labelSize.height / 2), withAttributes: nextStyle)
+        }
     }
 
     func drawCountdown() {
@@ -2931,7 +3049,7 @@ extension BoinkView {
         (number(score) as NSString).draw(at: CGPoint(x: panel.minX + 12, y: panel.maxY - 52), withAttributes: big)
         ("BEST" as NSString).draw(at: CGPoint(x: panel.minX + 170, y: panel.maxY - 20), withAttributes: label)
         (number(best) as NSString).draw(at: CGPoint(x: panel.minX + 170, y: panel.maxY - 38), withAttributes: small)
-        ("💥\(boinks)  ⚔️\(slices)  😅\(dodges)  💀\(kos)  🟢\(jellyHits)  x\(bestCombo)  🪙\(gold)" as NSString).draw(at: CGPoint(x: panel.minX + 14, y: panel.minY + 6), withAttributes: small)
+        ("💥\(boinks)  ⚔️\(slices)  😅\(dodges)  💀\(kos)  🟢\(jellyHits)  x\(bestCombo)  🪙\(goldText)" as NSString).draw(at: CGPoint(x: panel.minX + 14, y: panel.minY + 6), withAttributes: small)
 
         ("LEVEL \(isCountingDown ? upcoming : level)" as NSString).draw(at: CGPoint(x: panel.minX + 320, y: panel.maxY - 20), withAttributes: label)
         let seconds = isCountingDown ? levelTime : blobs.isEmpty ? 0 : timeLeft
@@ -3007,7 +3125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         view = BoinkView(frame: NSRect(origin: .zero, size: windowSize))
         panel.contentView = view
-        view.countIn(to: 1)
+        view.countIn(to: isDev ? argument(after: "--dev").flatMap { Int($0) }.map { max(1, $0) } ?? 1 : 1)
         panel.orderFrontRegardless()
 
         Timer.scheduledTimer(withTimeInterval: Double(tick), repeats: true) { [weak self] _ in self?.frame() }
@@ -3412,6 +3530,51 @@ if let path = argument(after: "--shop") {
     }
     print("earned \(earned) gold on level 1, shop open \(shopping); after buying: \(view.gold) gold, weapon \(view.weapon), power rank \(view.rank(.power)); next level \(view.level), \(view.blobs.count) slimes")
     exit(shopping && view.weapon == .katana && view.rank(.power) == 2 && view.gold == earned + 100 - 40 - 20 - 40 ? 0 : 1)
+}
+
+if let path = argument(after: "--forge") {
+    let view = batView()
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1800, pixelsHigh: 1120, bitsPerSample: 8, samplesPerPixel: 4,
+                                  hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    bitmap.size = NSSize(width: 900, height: 560)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+    NSColor(calibratedWhite: 0.2, alpha: 1).setFill()
+    NSRect(x: 0, y: 0, width: 900, height: 560).fill()
+    for (row, choice) in Weapon.all.enumerated() {
+        for grade in 0..<3 {
+            view.weapon = choice
+            view.tiers[choice] = grade
+            view.handleAt = CGPoint(x: 60 + CGFloat(grade) * 290, y: 500 - CGFloat(row) * 105)
+            view.angle = .pi / 2
+            switch choice {
+            case .bat: view.drawBat()
+            case .katana: view.drawKatana()
+            case .saber: view.drawSaber()
+            case .fish: view.drawFish()
+            case .axe: view.drawAxe()
+            }
+            drawText(choice.tierNames[grade], at: CGPoint(x: view.handleAt.x + 80, y: view.handleAt.y - 48), size: 13, color: .white, weight: .bold)
+        }
+    }
+    NSGraphicsContext.restoreGraphicsState()
+    try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+
+    let shop = batView()
+    shop.tiers = [:]
+    shop.gold = 1000
+    let prices = (0..<3).compactMap { _ -> Int? in
+        let cost = shop.price(.forge(.bat))
+        shop.buy(.forge(.bat))
+        return cost
+    }
+    shop.boink(velocity: CGVector(dx: 0, dy: -900))
+    let forged = shop.me.maxHealth - shop.me.health
+    let plain = batView()
+    plain.boink(velocity: CGVector(dx: 0, dy: -900))
+    let base = plain.me.maxHealth - plain.me.health
+    print("bat forge prices \(prices), now \(shop.weapon.tierNames[shop.tier(.bat)]); damage \(String(format: "%.1f", base)) -> \(String(format: "%.1f", forged))")
+    exit(prices.count == 2 && prices[1] > prices[0] && abs(forged / base - 1.2) < 0.01 ? 0 : 1)
 }
 
 if let path = argument(after: "--stress") {

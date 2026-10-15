@@ -77,6 +77,7 @@ swiftc -O boink.swift -o boink
 | Screen shake | Right-click → Screen shake, or launch with `./boink --no-shake` |
 | Restart | Click anywhere after game over, double-click the penguin, or right-click → Reset |
 | Quit | Right-click → Quit Boink |
+| Dev mode | `./boink --dev` for endless gold, a level picker in the shop and right-click → 🛠 Open shop; `./boink --dev 12` starts at level 12. Dev scores never count as a best |
 
 ---
 
