@@ -10,6 +10,8 @@ let sliceSpeed: CGFloat = 480
 // Spin in radians per second above which the axe turns into a whirlwind.
 let whirlSpin: CGFloat = 8
 let penguinReach: CGFloat = 58
+// Past this many slimes each one is drawn with a coarser outline and without its inner bubbles.
+let crowdedAt = 8
 
 struct Burst {
     let point: CGPoint
@@ -86,6 +88,10 @@ let splitShrink: CGFloat = 0.7
 let healDelay: CGFloat = 2.5
 let healPerSecond: CGFloat = 8
 let windupFor: CGFloat = 0.7
+let maxStartSlimes = 5
+let maxSlimes = 14
+let shockReach: CGFloat = 180
+let shockShare: CGFloat = 0.5
 let stunFor: CGFloat = 2
 let slimeFor: CGFloat = 3.5
 let leapTime: CGFloat = 0.55
@@ -136,6 +142,7 @@ struct Jelly {
     var center: CGPoint
     var radii: [CGFloat]
     var speeds: [CGFloat]
+    var peak: CGFloat
 
     // Each point moves only along its own spoke from the center, so the outline can never fold over itself.
     static let spokes: [CGVector] = (0..<blobPoints).map { index in
@@ -148,6 +155,7 @@ struct Jelly {
         self.center = center
         radii = (0..<blobPoints).map { Jelly.restRadius($0, time: 0) }
         speeds = Array(repeating: 0, count: blobPoints)
+        peak = center.y + blobTop
     }
 
     // A gumdrop: a tall rounded top, a squashed base, and a slow breathing ripple.
@@ -165,31 +173,34 @@ struct Jelly {
         return hypot(rest.dx, rest.dy)
     }
 
+    static func restRadii(time: CGFloat) -> [CGFloat] { (0..<blobPoints).map { restRadius($0, time: time) } }
+
     var points: [CGPoint] {
         zip(Jelly.spokes, radii).map { CGPoint(x: center.x + $0.dx * $1, y: center.y + $0.dy * $1) }
     }
 
-    mutating func step(center: CGPoint, floor: CGFloat, time: CGFloat, dt: CGFloat) {
+    // Every slime breathes in step, so the rest shape is worked out once per frame and shared.
+    mutating func step(center: CGPoint, floor: CGFloat, rest: [CGFloat], dt: CGFloat) {
         self.center = center
         let previous = radii
 
         for i in 0..<blobPoints {
-            let rest = Jelly.restRadius(i, time: time)
             let left = previous[(i + blobPoints - 1) % blobPoints]
             let right = previous[(i + 1) % blobPoints]
-            let force = blobStiffness * (rest - previous[i]) + blobSmoothing * ((left + right) / 2 - previous[i]) - blobDamping * speeds[i]
+            let force = blobStiffness * (rest[i] - previous[i]) + blobSmoothing * ((left + right) / 2 - previous[i]) - blobDamping * speeds[i]
             speeds[i] += force * dt
         }
 
+        peak = -.infinity
         for i in 0..<blobPoints {
             radii[i] += speeds[i] * dt
             let spoke = Jelly.spokes[i]
-            let rest = Jelly.restRadius(i, time: time)
-            if radii[i] < rest * 0.35 { radii[i] = rest * 0.35; speeds[i] = abs(speeds[i]) * 0.3 }
+            if radii[i] < rest[i] * 0.35 { radii[i] = rest[i] * 0.35; speeds[i] = abs(speeds[i]) * 0.3 }
             if spoke.dy < 0 {
                 let toFloor = (center.y - floor) / -spoke.dy
                 if radii[i] > toFloor { radii[i] = toFloor; speeds[i] = -abs(speeds[i]) * 0.3 }
             }
+            peak = max(peak, center.y + spoke.dy * radii[i])
         }
     }
 
@@ -219,8 +230,11 @@ struct Jelly {
         }
     }
 
-    var path: NSBezierPath {
-        let points = points
+    var path: NSBezierPath { path(every: 1) }
+
+    func path(every step: Int) -> NSBezierPath {
+        let all = points
+        let points = Swift.stride(from: 0, to: blobPoints, by: step).map { all[$0] }
         let path = NSBezierPath()
         let count = points.count
         path.move(to: points[0])
@@ -249,6 +263,7 @@ struct Blob {
     var isScared = false
     var scaredAt: CGFloat = -1000
     var boinkedAt: CGFloat = -1000
+    var shakenAt: CGFloat = -1000
     var dodgedAt: CGFloat = -1000
     var isNearMiss = false
     var boinkPower: CGFloat = 0
@@ -283,12 +298,12 @@ struct Blob {
     var isGone: Bool { koAt > -1000 }
 }
 
-// Count and health keep climbing forever; size stops at 1.4 because huge slimes are costly to draw and crowd the floor.
+// Size and count stop growing because every slime on screen costs drawing time; past that, levels make them tougher instead.
 func levelSize(_ level: Int) -> CGFloat { min(1.4, 0.95 + 0.05 * CGFloat(level)) }
 
-func levelHealth(_ level: Int) -> CGFloat { 60 + 15 * CGFloat(level - 1) }
+func levelHealth(_ level: Int) -> CGFloat { 60 + 15 * CGFloat(level - 1) + 40 * CGFloat(max(0, level - maxStartSlimes)) }
 
-func levelSlimes(_ level: Int) -> Int { level }
+func levelSlimes(_ level: Int) -> Int { min(level, maxStartSlimes) }
 
 final class BoinkView: NSView {
     var handleAt = CGPoint(x: windowSize.width / 2 - 150, y: groundHeight + penguinReach)
@@ -364,7 +379,7 @@ final class BoinkView: NSView {
 
     var dizzyTime: CGFloat { CGFloat(dizzyFor + dizzyPerPower * Double(me.boinkPower)) }
 
-    var isDizzy: Bool { sinceBoink < dizzyTime }
+    var isDizzy: Bool { sinceBoink < dizzyTime || age(me.shakenAt) < dizzyFor }
 
     var sinceKO: CGFloat { CGFloat(age(me.koAt)) }
 
@@ -619,11 +634,13 @@ final class BoinkView: NSView {
     func startLevel(_ next: Int) {
         level = next
         levelAt = clock
-        let count = levelSlimes(next)
         let size = levelSize(next)
-        blobs = (0..<count).map { i in
-            let spread = count == 1 ? 0.78 : 0.35 + 0.6 * CGFloat(i) / CGFloat(count - 1)
-            return Blob(size: size, health: levelHealth(next), at: bounds.width * spread)
+        let margin = blobRadius * size + 8
+        // They drop in from random heights so they land one by one instead of lining up.
+        blobs = (0..<levelSlimes(next)).map { _ in
+            var blob = Blob(size: size, health: levelHealth(next), at: CGFloat.random(in: margin...(bounds.width - margin)))
+            blob.lift = CGFloat.random(in: 40...max(41, (bounds.height - ground) * 0.6))
+            return blob
         }
         current = 0
         banner("LEVEL \(next)", color: .systemBlue)
@@ -669,7 +686,8 @@ final class BoinkView: NSView {
         me.boinkPower = min(3, max(0, me.impact - 1) * 1.5)
         let airBonus = 1 + 0.25 * CGFloat(me.airHits)
         award(Int(CGFloat(hitPoints * combo) * airBonus), at: barrel, color: .systemYellow)
-        me.health -= min(50, 3 * me.impact * me.impact) * airBonus * (1 + 0.1 * CGFloat(combo - 1))
+        let damage = min(50, 3 * me.impact * me.impact) * airBonus * (1 + 0.1 * CGFloat(combo - 1))
+        me.health -= damage
         if me.airHits >= 1 {
             popups.append(Popup(text: "AIR x\(me.airHits)", position: CGPoint(x: me.jellyX, y: head.y + 90), born: clock, color: .systemTeal, size: 16 + 2 * CGFloat(min(me.airHits, 6))))
         }
@@ -715,16 +733,37 @@ final class BoinkView: NSView {
             NSSound(named: weapon == .fish ? "Bottle" : "Frog")?.play()
         }
         if me.boinkPower >= 2 || combo >= 3 { NSSound(named: "Funk")?.play() }
+        if !lastHitWasSlice && !isWhirling { shockwave(from: me.jellyX, damage: damage) }
         if me.health <= 0 {
             knockOut()
-        } else {
+        } else if lastHitWasSlice {
             split()
         }
     }
 
-    // Any hit breaks a slime into two smaller ones that fly apart, carrying its damage; the smallest ones just have to be beaten.
+    // A blunt smash squashes instead of splitting, and sends a shockwave along the floor that shoves, dizzies and hurts the slimes nearby.
+    func shockwave(from origin: CGFloat, damage: CGFloat) {
+        let struck = current
+        let reach = shockReach * (1 + 0.2 * me.boinkPower)
+        for i in blobs.indices where i != struck && !blobs[i].isGone && !blobs[i].isAirborne {
+            let gap = blobs[i].jellyX - origin
+            guard abs(gap) < reach else { continue }
+            let falloff = 1 - abs(gap) / reach
+            current = i
+            me.health -= damage * shockShare * falloff
+            me.shakenAt = clock
+            me.jellySpeed += (gap >= 0 ? 1 : -1) * 320 * falloff
+            me.liftSpeed = 300 * falloff
+            me.jelly.dent(toward: CGVector(dx: -gap, dy: -20), strength: 1.4 * falloff)
+            if me.health <= 0 { knockOut() }
+        }
+        current = struck
+        bursts.append(Burst(point: CGPoint(x: origin, y: ground + 6), born: clock, size: reach / 110, isRing: true))
+    }
+
+    // A blade's cut breaks a slime into two smaller ones that fly apart, carrying its damage; the smallest ones, or any past the crowd limit, just have to be beaten.
     func split() {
-        guard me.size >= minSplitSize else { return }
+        guard me.size >= minSplitSize, blobs.count < maxSlimes else { return }
         let parent = me
         let size = parent.size * splitShrink
         let halves = [-1, 1].map { (side: CGFloat) -> Blob in
@@ -821,6 +860,7 @@ final class BoinkView: NSView {
         let stacked = CGFloat(popups.count)
         let spot = CGPoint(x: spot.x + (popups.count % 2 == 0 ? 30 : -30), y: spot.y + stacked * 24)
         popups.append(Popup(text: text, position: spot, born: clock, color: color, size: size))
+        if popups.count > 24 { popups.removeFirst(popups.count - 24) }
     }
 
     func banner(_ text: String, color: NSColor) {
@@ -871,7 +911,12 @@ final class BoinkView: NSView {
         let floor = ground + me.lift
         let top = jellyTop
         let across = abs(barrel.x - me.jellyX)
-        let isTouching = across < radius * 0.9 + barrelRadius && barrel.y < top + barrelRadius && barrel.y > floor - barrelRadius
+        // A blunt weapon lands with its whole heavy end, not just the very tip.
+        let isTouching = (0...6).contains { i in
+            let t = 0.55 + 0.075 * CGFloat(i)
+            let point = CGPoint(x: handle.x + (barrel.x - handle.x) * t, y: handle.y + (barrel.y - handle.y) * t)
+            return abs(point.x - me.jellyX) < radius * 0.9 + barrelRadius && point.y < top + barrelRadius && point.y > floor - barrelRadius
+        }
         let isClose = across < radius + dodgeMargin && barrel.y < top + dodgeMargin && barrel.y > floor - 10
 
         let blade = (0...10).map { i -> CGPoint in
@@ -1136,6 +1181,7 @@ final class BoinkView: NSView {
 
         if !isGameOver { forEachBlob { checkHit() } }
         lastBarrel = barrel
+        let rest = Jelly.restRadii(time: clock)
         forEachBlob {
             if !isGameOver { rampage() }
             whirlPull()
@@ -1143,7 +1189,7 @@ final class BoinkView: NSView {
             flee()
             heal()
             for _ in 0..<substeps {
-                me.jelly.step(center: jellyCenter, floor: ground + me.lift, time: clock, dt: tick / CGFloat(substeps))
+                me.jelly.step(center: jellyCenter, floor: ground + me.lift, rest: rest, dt: tick / CGFloat(substeps))
             }
         }
         separate()
@@ -1188,11 +1234,10 @@ final class BoinkView: NSView {
         drawSwoosh()
 
         forEachBlob {
-            let blob = me.jelly.path
+            let blob = jellyPath
             drawJellyShadow(blob)
             withJellyTransform {
                 drawJellyBody(blob)
-                drawJellyShine(blob)
                 drawFace()
             }
             drawJellyFlash()
@@ -1318,7 +1363,7 @@ func paintJellyGradients(in box: NSRect, bright: NSColor, deep: NSColor) {
 // Painting three gradients per slime every frame is the main drawing cost, so the usual green body is painted once and stretched.
 let jellyTexture: CGImage = {
     let size = NSSize(width: blobRadius * 2, height: blobTop + blobBottom)
-    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 4), pixelsHigh: Int(size.height * 4), bitsPerSample: 8,
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     bitmap.size = size
     NSGraphicsContext.saveGraphicsState()
@@ -1328,10 +1373,51 @@ let jellyTexture: CGImage = {
     return bitmap.cgImage!
 }()
 
+// Emoji are slow to lay out, and every angry slime shows this one each frame.
+let rageIcon: NSImage = {
+    let face = "😡" as NSString
+    let style: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12)]
+    let size = face.size(withAttributes: style)
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
+                                  samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    bitmap.size = size
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+    face.draw(at: .zero, withAttributes: style)
+    NSGraphicsContext.restoreGraphicsState()
+    let image = NSImage(size: size)
+    image.addRepresentation(bitmap)
+    return image
+}()
+
 func shifted(_ color: NSColor, by turn: CGFloat) -> NSColor {
     let base = color.usingColorSpace(.deviceRGB) ?? color
     let hue = (base.hueComponent + turn).truncatingRemainder(dividingBy: 1)
     return NSColor(hue: hue, saturation: min(1, base.saturationComponent + 0.15), brightness: base.brightnessComponent, alpha: base.alphaComponent)
+}
+
+// Dizzy slimes each orbit up to nine stars; laying them out as text every frame was a big share of a crowded frame.
+let starShape: NSBezierPath = {
+    let star = NSBezierPath()
+    for i in 0..<10 {
+        let a = .pi / 2 + CGFloat(i) * .pi / 5
+        let r: CGFloat = i % 2 == 0 ? 7 : 3
+        let point = CGPoint(x: cos(a) * r, y: sin(a) * r)
+        if i == 0 { star.move(to: point) } else { star.line(to: point) }
+    }
+    star.close()
+    star.lineWidth = 1.2
+    star.lineJoinStyle = .round
+    return star
+}()
+
+func drawStar(at point: CGPoint) {
+    let star = starShape.copy() as! NSBezierPath
+    star.transform(using: AffineTransform(translationByX: point.x, byY: point.y))
+    NSColor.white.setStroke()
+    star.stroke()
+    NSColor.systemYellow.setFill()
+    star.fill()
 }
 
 func circle(_ center: CGPoint, _ radius: CGFloat) -> NSBezierPath {
@@ -1361,6 +1447,10 @@ extension BoinkView {
     var brightColor: NSColor { rainbowTurn == 0 ? jellyBright : shifted(jellyBright, by: rainbowTurn) }
 
     var deepColor: NSColor { rainbowTurn == 0 ? jellyDeep : shifted(jellyDeep, by: rainbowTurn) }
+
+    var isCrowded: Bool { blobs.count > crowdedAt }
+
+    var jellyPath: NSBezierPath { me.jelly.path(every: isCrowded ? 2 : 1) }
 
     func drawWhirlwind() {
         guard weapon == .axe else { return }
@@ -1730,20 +1820,20 @@ extension BoinkView {
         if t < 0.12 {
             withJellyTransform {
                 NSColor.white.withAlphaComponent(0.75 * (1 - t / 0.12)).setFill()
-                me.jelly.path.fill()
+                jellyPath.fill()
             }
         }
+        let lines = NSBezierPath()
         for i in 0..<14 {
             let a = CGFloat(i) / 14 * 2 * .pi + 0.2
             let inner = (80 + t * 120) * me.size
-            let line = NSBezierPath()
-            line.move(to: CGPoint(x: center.x + cos(a) * inner, y: center.y + sin(a) * inner * 0.7))
-            line.line(to: CGPoint(x: center.x + cos(a) * (inner + 30 * fade), y: center.y + sin(a) * (inner + 30 * fade) * 0.7))
-            line.lineWidth = 2.5
-            line.lineCapStyle = .round
-            NSColor.white.withAlphaComponent(0.7 * fade).setStroke()
-            line.stroke()
+            lines.move(to: CGPoint(x: center.x + cos(a) * inner, y: center.y + sin(a) * inner * 0.7))
+            lines.line(to: CGPoint(x: center.x + cos(a) * (inner + 30 * fade), y: center.y + sin(a) * (inner + 30 * fade) * 0.7))
         }
+        lines.lineWidth = 2.5
+        lines.lineCapStyle = .round
+        NSColor.white.withAlphaComponent(0.7 * fade).setStroke()
+        lines.stroke()
     }
 
     func drawBursts() {
@@ -1908,14 +1998,15 @@ extension BoinkView {
         let box = blob.bounds
         NSGraphicsContext.saveGraphicsState()
         blob.addClip()
-        if rainbowTurn == 0 {
-            NSGraphicsContext.current?.cgContext.draw(jellyTexture, in: box)
+        if rainbowTurn == 0, let context = NSGraphicsContext.current?.cgContext {
+            context.interpolationQuality = .low
+            context.draw(jellyTexture, in: box)
         } else {
             paintJellyGradients(in: box, bright: brightColor, deep: deepColor)
         }
         drawRage(in: box)
 
-        for bubble in bubbles {
+        for bubble in isCrowded ? [] : bubbles {
             let rise = (clock * bubble.speed / box.height + bubble.phase).truncatingRemainder(dividingBy: 1)
             let ring = circle(CGPoint(x: box.midX + bubble.x * box.width * 0.45, y: box.minY + rise * box.height), bubble.size)
             NSColor.white.withAlphaComponent(0.18 * (1 - rise)).setFill()
@@ -1924,8 +2015,8 @@ extension BoinkView {
             NSColor.white.withAlphaComponent(0.5 * (1 - rise)).setStroke()
             ring.stroke()
         }
+        drawJellyShine(in: box)
         NSGraphicsContext.restoreGraphicsState()
-
 
         blob.lineWidth = 2.5
         (jellyRim.blended(withFraction: shownRage * 0.9, of: NSColor(calibratedRed: 0.45, green: 0, blue: 0.05, alpha: 1)) ?? jellyRim).setStroke()
@@ -1955,10 +2046,7 @@ extension BoinkView {
         tide.stroke()
     }
 
-    func drawJellyShine(_ blob: NSBezierPath) {
-        let box = blob.bounds
-        NSGraphicsContext.saveGraphicsState()
-        blob.addClip()
+    func drawJellyShine(in box: NSRect) {
         let shine = NSBezierPath()
         shine.appendArc(withCenter: CGPoint(x: box.midX, y: box.minY + box.height * 0.2), radius: box.width * 0.42, startAngle: 120, endAngle: 150)
         shine.lineWidth = 7
@@ -1969,13 +2057,9 @@ extension BoinkView {
         circle(CGPoint(x: box.minX + box.width * 0.17, y: box.minY + box.height * 0.42), 3).fill()
         NSColor.white.withAlphaComponent(0.5).setFill()
         circle(CGPoint(x: box.maxX - box.width * 0.13, y: box.minY + box.height * 0.3), 2).fill()
-        NSGraphicsContext.restoreGraphicsState()
     }
 
-    var faceTop: CGFloat {
-        let highest = me.jelly.points.max { $0.y < $1.y }?.y ?? jellyCenter.y
-        return min(highest, jellyCenter.y + blobTop * 1.2)
-    }
+    var faceTop: CGFloat { min(me.jelly.peak, jellyCenter.y + blobTop * 1.2) }
 
     func eye(_ side: CGFloat) -> CGPoint { CGPoint(x: me.jellyX + side * 16, y: faceTop - 20) }
 
@@ -2173,7 +2257,7 @@ extension BoinkView {
         let stars = 3 + Int(me.boinkPower.rounded()) * 2
         for i in 0..<stars {
             let angle = clock * (4 + me.boinkPower) + CGFloat(i) * 2 * .pi / CGFloat(stars)
-            drawText("★", at: CGPoint(x: me.jellyX + cos(angle) * 34, y: faceTop + 2 + sin(angle) * 8), size: 15, color: .systemYellow, weight: .regular)
+            drawStar(at: CGPoint(x: me.jellyX + cos(angle) * 34, y: faceTop + 10 + sin(angle) * 8))
         }
     }
 
@@ -2219,7 +2303,7 @@ extension BoinkView {
         let pulse = me.rage >= 1 || isEnraged ? 0.6 + 0.4 * abs(sin(clock * 12)) : 1
         NSColor.systemRed.withAlphaComponent(pulse).setFill()
         NSBezierPath(roundedRect: NSRect(x: frame.minX, y: frame.minY, width: frame.width * (isEnraged ? 1 : me.rage), height: frame.height), xRadius: 3, yRadius: 3).fill()
-        drawText("😡", at: CGPoint(x: frame.minX - 12, y: frame.minY - 7), size: 12, color: .white, weight: .regular)
+        rageIcon.draw(at: CGPoint(x: frame.minX - 12 - rageIcon.size.width / 2, y: frame.minY - 7), from: .zero, operation: .sourceOver, fraction: 1)
     }
 
     func drawSpit() {
@@ -2974,6 +3058,32 @@ if let path = argument(after: "--vibe") {
     view.toggleVibe()
     print("vibe keeps clock \(view.clock == frozen.0), time left \(view.timeLeft == frozen.1)")
     exit(view.clock == frozen.0 && !view.isVibing ? 0 : 1)
+}
+
+if let level = argument(after: "--bench").flatMap({ Int($0) }) {
+    let view = batView()
+    view.startLevel(level)
+    var hits = 0
+    while hits < 200, let index = view.blobs.firstIndex(where: { !$0.isGone && $0.size >= minSplitSize }) {
+        view.current = index
+        view.me.boinkedAt = -1000
+        view.me.health = 1000
+        view.boink(velocity: CGVector(dx: 0, dy: 600), slicingAt: view.bodyCenter)
+        hits += 1
+    }
+    view.popups = []
+    view.particles = []
+    view.bursts = []
+    let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+    let start = Date()
+    for _ in 0..<300 {
+        view.step()
+        view.levelAt = view.clock
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+    }
+    let perFrame = Date().timeIntervalSince(start) / 300 * 1000
+    print("level \(level): \(view.blobs.count) slimes, \(String(format: "%.2f", perFrame)) ms per frame")
+    exit(0)
 }
 
 if let path = argument(after: "--stress") {
