@@ -6,7 +6,7 @@
 
 **A tiny, juicy desktop game for the idle seconds of vibecoding.**
 It floats transparently over your editor, clicks pass straight through to your work,
-and a penguin with a katana is always one grab away.
+and a penguin with a bat is always one grab away.
 
 ![Triple slice](assets/slice.png)
 
@@ -34,9 +34,10 @@ That's exactly one level of Jelly-Smasher.
 |---|---|
 | 🏏 **Speed is damage** | A lazy poke tickles. A full-speed swing goes *BOINK*. Damage and knockback follow how fast the blade is actually moving. |
 | 🪂 **Juggle combos** | Hard hits launch slimes into the air. Keep them airborne for AIR x2, x3… and stack up bonus damage. |
-| ✂️ **Everything splits** | Every hit cuts a slime into two smaller ones, which fly apart carrying its damage. Slice, split, slice again. |
+| ✂️ **Blades split, bats send flying** | A katana or saber cuts a slime into two smaller ones that fly apart carrying its damage. A bat or fish sends it flying the way you swung: it SPLATs into walls and BOWLs into other slimes. |
 | 😡 **Slimes fight back** | Push them too far and they wind up, leap at you and spit goo that gums up your grip. |
-| 📈 **It never stops** | Level N brings N slimes, each bigger and beefier than the last. Count and HP grow forever. How far can you get? |
+| 📈 **It never stops** | Each level brings more slimes (up to 5), bigger and beefier than the last. After that, HP keeps climbing forever. How far can you get? |
+| 🪙 **Shop between levels** | Smashing earns gold. Spend it after each level on new weapons and on upgrades for damage, time, knockback and gold. Everything resets when the run ends. |
 | 🧃 **Juice everywhere** | Soft-body jelly physics, hit-stop freeze frames, screen shake, splatter, combo banners and dizzy googly eyes. |
 
 ![Triple boink](assets/combo.png)
@@ -45,11 +46,11 @@ That's exactly one level of Jelly-Smasher.
 
 | | Weapon | Feel |
 |---|---|---|
-| ⚔️ | **Katana** | The starter. Long, fast, slices clean. |
-| ⚾ | **Bat** | Heavy and blunt. Big launches for juggling. |
-| ✨ | **Saber** | Glowing, light, whippy. |
-| 🐟 | **Fish** | You know why. |
-| 🪓 | **Whirlwind Axe** | Heavy head, barely any drag. Spin it in circles and it becomes a whirlwind that sucks slimes in and chops everything in reach. |
+| ⚾ | **Bat** | The starter. Smashes slimes across the floor, into walls and into each other, with a shockwave that dizzies the crowd. |
+| 🐟 | **Fish** · 25 🪙 | A lighter, slappier smash. You know why. |
+| ⚔️ | **Katana** · 40 🪙 | Long, fast, slices clean. |
+| 🪓 | **Whirlwind Axe** · 60 🪙 | Heavy chops that split and hit 35% harder. Spin it in circles and it becomes a whirlwind that sucks slimes in and chops everything in reach. |
+| ✨ | **Saber** · 90 🪙 | Glowing, light, whippy. |
 
 ![Rage leap](assets/rage.png)
 

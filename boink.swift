@@ -37,13 +37,36 @@ enum Weapon {
 
     var isBlunt: Bool { self == .bat || self == .fish || self == .axe }
 
+    var isSmash: Bool { self == .bat || self == .fish }
+
+    // How much of the swing's speed a smash hands to the jelly.
+    var knock: CGFloat { self == .fish ? 0.85 : 1 }
+
     var index: Int { Weapon.all.firstIndex(of: self) ?? 0 }
 
     var label: String { ["⚾ bat", "⚔️ katana", "✨ saber", "🐟 fish", "🪓 axe"][index] }
 
     var hit: String { self == .fish ? "SLAP" : self == .axe ? "CHOP" : "BOINK" }
 
+    var price: Int { [0, 40, 90, 25, 60][index] }
+
+    var blurb: String { ["", "fast clean slices", "slices that sear", "a light, slappy smash", "heavy chops and a whirlwind"][index] }
+
     static let all: [Weapon] = [.bat, .katana, .saber, .fish, .axe]
+}
+
+enum Upgrade: Int, CaseIterable {
+    case power, time, heft, greed
+
+    var label: String { ["💪 Power · +15% damage", "⏱ Time · +2 s per level", "🏏 Heft · bat and fish knock 20% harder", "🪙 Greed · +25% gold"][rawValue] }
+
+    var basePrice: Int { [20, 15, 15, 25][rawValue] }
+}
+
+let maxRank = 5
+
+enum Ware {
+    case weapon(Weapon), upgrade(Upgrade)
 }
 
 struct Cut {
@@ -74,7 +97,9 @@ let dashFor: CGFloat = 0.6
 let corneredBeforeDash: CGFloat = 1.0
 let boinkSpeed: CGFloat = 450
 let airGravity: CGFloat = 1700
-let bounceKeep: CGFloat = 0.5
+let bounceKeep: CGFloat = 0.78
+let bounceFrom: CGFloat = 180
+let wallBounce: CGFloat = 0.85
 let maxLaunch: CGFloat = 1000
 let dodgeMargin: CGFloat = 45
 let dizzyFor: CGFloat = 1.2
@@ -83,6 +108,7 @@ let soreFor: CGFloat = 1.5
 let comboWindow: CGFloat = 2
 let koFor: CGFloat = 0.8
 let levelFor: CGFloat = 10
+let countFrom = 5
 let minSplitSize: CGFloat = 0.85
 let splitShrink: CGFloat = 0.7
 let healDelay: CGFloat = 2.5
@@ -92,6 +118,11 @@ let maxStartSlimes = 5
 let maxSlimes = 14
 let shockReach: CGFloat = 180
 let shockShare: CGFloat = 0.5
+let maxKnock: CGFloat = 1400
+let tumbleFriction: CGFloat = 0.975
+let splatSpeed: CGFloat = 450
+let bowlSpeed: CGFloat = 300
+let chopPower: CGFloat = 1.35
 let stunFor: CGFloat = 2
 let slimeFor: CGFloat = 3.5
 let leapTime: CGFloat = 0.55
@@ -264,6 +295,7 @@ struct Blob {
     var scaredAt: CGFloat = -1000
     var boinkedAt: CGFloat = -1000
     var shakenAt: CGFloat = -1000
+    var tumbling = false
     var dodgedAt: CGFloat = -1000
     var isNearMiss = false
     var boinkPower: CGFloat = 0
@@ -341,7 +373,14 @@ final class BoinkView: NSView {
     var slimedAt: CGFloat = -1000
     var slimeGrip = CGPoint.zero
     var jellyHits = 0
-    var weapon = Weapon.katana
+    var weapon = Weapon.bat
+    var gold = 0
+    var owned: Set<Weapon> = [.bat]
+    var ranks: [Upgrade: Int] = [:]
+    var isShopping = false
+    var countdownAt: CGFloat = -1000
+    var upcoming = 1
+    var shownCount = 0
     var slices = 0
     var cut: Cut?
     var slicedAt: CGFloat = -1000
@@ -391,7 +430,11 @@ final class BoinkView: NSView {
 
     var isAnyEnraged: Bool { blobs.contains { $0.isEnraged } }
 
-    var timeLeft: CGFloat { max(0, levelFor - age(levelAt)) }
+    var levelTime: CGFloat { levelFor + 2 * CGFloat(rank(.time)) }
+
+    var timeLeft: CGFloat { max(0, levelTime - age(levelAt)) }
+
+    func rank(_ upgrade: Upgrade) -> Int { ranks[upgrade, default: 0] }
 
     var isGameOver: Bool { gameOverAt > -1000 }
 
@@ -517,8 +560,17 @@ final class BoinkView: NSView {
             toggleVibe()
             return
         }
+        if isShopping && shopFrame.contains(point) {
+            if nextFrame.contains(point) {
+                leaveShop()
+            } else if let row = wares.indices.first(where: { wareFrame($0).contains(point) }) {
+                buy(wares[row])
+            }
+            return
+        }
         if isOverToggle(point) {
-            arm(Weapon.all[min(Weapon.all.count - 1, Int((point.x - toggleFrame.minX) / (toggleFrame.width / CGFloat(Weapon.all.count))))])
+            let choice = Weapon.all[min(Weapon.all.count - 1, Int((point.x - toggleFrame.minX) / (toggleFrame.width / CGFloat(Weapon.all.count))))]
+            if owned.contains(choice) { arm(choice) } else { NSSound(named: "Basso")?.play() }
             return
         }
         guard let grip = grip(at: point) else { return }
@@ -537,11 +589,13 @@ final class BoinkView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu()
+        menu.autoenablesItems = false
         for choice in Weapon.all {
-            let item = menu.addItem(withTitle: choice.label, action: #selector(pickWeapon(_:)), keyEquivalent: "")
+            let item = menu.addItem(withTitle: owned.contains(choice) ? choice.label : "🔒 \(choice.label) · \(choice.price) gold in the shop", action: #selector(pickWeapon(_:)), keyEquivalent: "")
             item.target = self
             item.tag = choice.index
             item.state = choice == weapon ? .on : .off
+            item.isEnabled = owned.contains(choice)
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: isVibing ? "Back to smashing (F3)" : "Vibe (F3)", action: #selector(toggleVibe), keyEquivalent: "").target = self
@@ -627,7 +681,12 @@ final class BoinkView: NSView {
         popups = []
         swoosh = []
         gameOverAt = -1000
-        startLevel(1)
+        gold = 0
+        owned = [.bat]
+        ranks = [:]
+        isShopping = false
+        weapon = .bat
+        countIn(to: 1)
         NSSound(named: "Bottle")?.play()
     }
 
@@ -639,7 +698,8 @@ final class BoinkView: NSView {
         // They drop in from random heights so they land one by one instead of lining up.
         blobs = (0..<levelSlimes(next)).map { _ in
             var blob = Blob(size: size, health: levelHealth(next), at: CGFloat.random(in: margin...(bounds.width - margin)))
-            blob.lift = CGFloat.random(in: 40...max(41, (bounds.height - ground) * 0.6))
+            let ceiling = max(100, bounds.height - ground - (blobBottom + 2 + blobTop) * size - 10)
+            blob.lift = CGFloat.random(in: (ceiling * 0.6)...ceiling)
             return blob
         }
         current = 0
@@ -650,6 +710,7 @@ final class BoinkView: NSView {
         clearedAt = clock
         let bonus = Int(timeLeft * 100) * level
         award(bonus, at: CGPoint(x: bounds.midX, y: ground + 120), color: .systemGreen, size: 30, label: "TIME BONUS")
+        earn(5 + Int(timeLeft), at: CGPoint(x: bounds.midX, y: ground + 150))
         banner("LEVEL \(level) CLEAR!", color: .systemGreen)
         NSSound(named: "Glass")?.play()
     }
@@ -686,12 +747,17 @@ final class BoinkView: NSView {
         me.boinkPower = min(3, max(0, me.impact - 1) * 1.5)
         let airBonus = 1 + 0.25 * CGFloat(me.airHits)
         award(Int(CGFloat(hitPoints * combo) * airBonus), at: barrel, color: .systemYellow)
-        let damage = min(50, 3 * me.impact * me.impact) * airBonus * (1 + 0.1 * CGFloat(combo - 1))
+        let isSmash = contact == nil && weapon.isSmash
+        let damage = min(50, 3 * me.impact * me.impact) * airBonus * (1 + 0.1 * CGFloat(combo - 1)) * (weapon == .axe ? chopPower : 1) * (1 + 0.15 * CGFloat(rank(.power)))
         me.health -= damage
         if me.airHits >= 1 {
             popups.append(Popup(text: "AIR x\(me.airHits)", position: CGPoint(x: me.jellyX, y: head.y + 90), born: clock, color: .systemTeal, size: 16 + 2 * CGFloat(min(me.airHits, 6))))
         }
-        launch(velocity, wasAirborne: wasAirborne, scale: contact == nil ? 1 : 0.4)
+        if isSmash {
+            smashAway(velocity, wasAirborne: wasAirborne)
+        } else {
+            launch(velocity, wasAirborne: wasAirborne, scale: contact == nil ? 1.25 : 0.8)
+        }
         splash(at: barrel, count: Int(10 + 8 * me.boinkPower) + 4 * combo, force: 260 + 120 * me.boinkPower)
         shake = max(shake, 4 + 3 * me.boinkPower + 2 * CGFloat(combo))
         // A blade passes straight through, so slices get only a blink of hit-stop.
@@ -728,23 +794,89 @@ final class BoinkView: NSView {
             }
             me.weird = Set(Weird.allCases.shuffled().prefix(Int(me.boinkPower.rounded())))
             spin *= -0.6
-            me.jellySpeed += clamp(velocity.dx * 0.5, -520, 520)
+            if !isSmash { me.jellySpeed += clamp(velocity.dx * 0.5, -520, 520) }
             me.jelly.wobble(toward: CGVector(dx: velocity.dx * 0.3, dy: max(abs(velocity.dy), 1)), strength: 1.2 + 0.6 * me.boinkPower)
             NSSound(named: weapon == .fish ? "Bottle" : "Frog")?.play()
         }
         if me.boinkPower >= 2 || combo >= 3 { NSSound(named: "Funk")?.play() }
-        if !lastHitWasSlice && !isWhirling { shockwave(from: me.jellyX, damage: damage) }
+        if isSmash { shockwave(from: me.jellyX, damage: damage) }
         if me.health <= 0 {
             knockOut()
-        } else if lastHitWasSlice {
+        } else if !isSmash {
             split()
+        }
+    }
+
+    // A smash hands the swing's momentum to the jelly: it flies, slides and rebounds the way it was hit, lighter slimes further.
+    func smashAway(_ velocity: CGVector, wasAirborne: Bool) {
+        let push = weapon.knock * (1 + 0.2 * CGFloat(rank(.heft))) / me.size
+        me.tumbling = true
+        me.jellySpeed = clamp(me.jellySpeed * 0.3 + velocity.dx * push, -maxKnock, maxKnock)
+        if velocity.dy < 0 && wasAirborne {
+            me.liftSpeed = min(me.liftSpeed, velocity.dy * push)
+        } else if velocity.dy < 0 {
+            me.liftSpeed = min(maxLaunch, -velocity.dy * push * 0.7)
+        } else {
+            me.liftSpeed = min(maxLaunch, max(me.liftSpeed, 0) + velocity.dy * push * 0.8 + (wasAirborne ? 300 : 0))
+        }
+    }
+
+    func chain() {
+        combo = isComboLive ? combo + 1 : 1
+        bestCombo = max(bestCombo, combo)
+        lastHitAt = clock
+    }
+
+    func splat(_ speed: CGFloat) {
+        let side: CGFloat = me.jellyX < bounds.midX ? -1 : 1
+        let damage = speed * 0.03
+        chain()
+        me.health -= damage
+        me.shakenAt = clock
+        me.jelly.dent(toward: CGVector(dx: side, dy: 0), strength: min(2.5, speed / 450))
+        shake = max(shake, speed / 150)
+        hitstop = max(hitstop, 3)
+        award(Int(damage * 12) * combo, at: CGPoint(x: me.jellyX, y: jellyTop + 20), color: .systemPink, label: "SPLAT")
+        earn(1, at: CGPoint(x: me.jellyX, y: jellyTop + 20))
+        splash(at: CGPoint(x: me.jellyX + side * radius, y: bodyCenter.y), count: 16, force: 260)
+        NSSound(named: "Bottle")?.play()
+        if me.health <= 0 { knockOut() }
+    }
+
+    // A tumbling slime knocks into the others like a bowling ball, trading momentum by size and hurting both.
+    func bowl(_ a: Int, _ b: Int, closing: CGFloat) {
+        let (ma, mb) = (blobs[a].size * blobs[a].size, blobs[b].size * blobs[b].size)
+        let (va, vb) = (blobs[a].jellySpeed, blobs[b].jellySpeed)
+        let bounce: CGFloat = 0.9
+        blobs[a].jellySpeed = (ma * va + mb * vb + mb * bounce * (vb - va)) / (ma + mb)
+        blobs[b].jellySpeed = (ma * va + mb * vb + ma * bounce * (va - vb)) / (ma + mb)
+        chain()
+        let damage = closing * 0.02
+        for i in [a, b] {
+            current = i
+            me.tumbling = true
+            me.shakenAt = clock
+            me.health -= damage
+            if !isAirborne { me.liftSpeed = closing * 0.25 }
+            me.jelly.dent(toward: CGVector(dx: i == a ? 1 : -1, dy: 0), strength: min(2, closing / 500))
+        }
+        let spot = CGPoint(x: (blobs[a].jellyX + blobs[b].jellyX) / 2, y: ground + blobs[b].lift + 60)
+        award(Int(damage * 20) * combo, at: spot, color: .systemOrange, label: "BOWLED")
+        earn(1, at: spot)
+        bursts.append(Burst(point: spot, born: clock, size: 20 + closing / 60, isRing: false, color: .systemOrange))
+        shake = max(shake, closing / 180)
+        hitstop = max(hitstop, 2)
+        NSSound(named: "Frog")?.play()
+        for i in [a, b] where !blobs[i].isGone && blobs[i].health <= 0 {
+            current = i
+            knockOut()
         }
     }
 
     // A blunt smash squashes instead of splitting, and sends a shockwave along the floor that shoves, dizzies and hurts the slimes nearby.
     func shockwave(from origin: CGFloat, damage: CGFloat) {
         let struck = current
-        let reach = shockReach * (1 + 0.2 * me.boinkPower)
+        let reach = shockReach * (1 + 0.2 * me.boinkPower) * (1 + 0.2 * CGFloat(rank(.heft)))
         for i in blobs.indices where i != struck && !blobs[i].isGone && !blobs[i].isAirborne {
             let gap = blobs[i].jellyX - origin
             guard abs(gap) < reach else { continue }
@@ -790,7 +922,7 @@ final class BoinkView: NSView {
 
     // Soft taps leave it on the ground; a hard hit pops it up, and any hit in the air keeps it up, or spikes it down.
     func launch(_ velocity: CGVector, wasAirborne: Bool, scale: CGFloat) {
-        let pop = max(0, me.impact - 1.3)
+        let pop = max(0, me.impact - 1.1)
         guard pop > 0 || wasAirborne else { return }
         if wasAirborne && velocity.dy < -abs(velocity.dx) {
             me.liftSpeed = min(me.liftSpeed, velocity.dy * 0.7)
@@ -811,11 +943,11 @@ final class BoinkView: NSView {
         guard me.lift <= 0 else { return }
         me.lift = 0
         let fall = -me.liftSpeed
-        if fall > 320 {
+        if fall > bounceFrom {
             me.liftSpeed = fall * bounceKeep
-            me.jellySpeed *= 0.8
-            me.jelly.wobble(toward: CGVector(dx: 0, dy: 1), strength: min(2.2, fall / 500))
-            shake = max(shake, fall / 200)
+            me.jellySpeed *= 0.92
+            me.jelly.wobble(toward: CGVector(dx: 0, dy: 1), strength: min(2.2, fall / 400))
+            if fall > 600 { shake = max(shake, fall / 250) }
             NSSound(named: "Bottle")?.play()
         } else {
             me.liftSpeed = 0
@@ -842,6 +974,7 @@ final class BoinkView: NSView {
         me.fury = .idle
         me.koAt = clock
         award(Int(500 * me.size) * combo, at: CGPoint(x: me.jellyX, y: ground - 70), color: .systemRed, size: 30, label: "K.O.")
+        earn(5 + level, at: CGPoint(x: me.jellyX, y: ground - 70))
         let isLast = blobs.allSatisfy { $0.isGone }
         if isLast { banner("K.O.!!", color: .systemRed) }
         splash(at: head, count: isLast ? 70 : 30, force: 520)
@@ -862,6 +995,71 @@ final class BoinkView: NSView {
         popups.append(Popup(text: text, position: spot, born: clock, color: color, size: size))
         if popups.count > 24 { popups.removeFirst(popups.count - 24) }
     }
+
+    func earn(_ amount: Int, at spot: CGPoint) {
+        let amount = Int((CGFloat(amount) * (1 + 0.25 * CGFloat(rank(.greed)))).rounded())
+        gold += amount
+        popups.append(Popup(text: "+\(amount) 🪙", position: CGPoint(x: spot.x, y: spot.y + 34), born: clock, color: .systemYellow, size: 18))
+    }
+
+    var wares: [Ware] { Weapon.all.dropFirst().map { .weapon($0) } + Upgrade.allCases.map { .upgrade($0) } }
+
+    func price(_ ware: Ware) -> Int? {
+        switch ware {
+        case .weapon(let choice): return owned.contains(choice) ? nil : choice.price
+        case .upgrade(let upgrade): return rank(upgrade) >= maxRank ? nil : upgrade.basePrice * (rank(upgrade) + 1)
+        }
+    }
+
+    func buy(_ ware: Ware) {
+        guard let cost = price(ware), cost <= gold else {
+            NSSound(named: "Basso")?.play()
+            return
+        }
+        gold -= cost
+        switch ware {
+        case .weapon(let choice):
+            owned.insert(choice)
+            arm(choice)
+        case .upgrade(let upgrade):
+            ranks[upgrade, default: 0] += 1
+        }
+        NSSound(named: "Purr")?.play()
+    }
+
+    func leaveShop() {
+        isShopping = false
+        countIn(to: level + 1)
+    }
+
+    var isCountingDown: Bool { countdownAt > -1000 }
+
+    var countLeft: Int { countFrom - Int(age(countdownAt)) }
+
+    func countIn(to next: Int) {
+        blobs = []
+        upcoming = next
+        countdownAt = clock
+        shownCount = 0
+    }
+
+    func countDown() {
+        if countLeft <= 0 {
+            countdownAt = -1000
+            startLevel(upcoming)
+            banner("GO!", color: .systemGreen)
+            NSSound(named: "Hero")?.play()
+        } else if countLeft != shownCount {
+            shownCount = countLeft
+            NSSound(named: "Tink")?.play()
+        }
+    }
+
+    var shopFrame: NSRect { NSRect(x: bounds.midX - 270, y: bounds.midY - 230, width: 540, height: 430) }
+
+    func wareFrame(_ row: Int) -> NSRect { NSRect(x: shopFrame.minX + 16, y: shopFrame.maxY - 112 - CGFloat(row) * 36, width: shopFrame.width - 32, height: 30) }
+
+    var nextFrame: NSRect { NSRect(x: shopFrame.midX - 100, y: shopFrame.minY + 14, width: 200, height: 36) }
 
     func banner(_ text: String, color: NSColor) {
         bannerText = text
@@ -943,7 +1141,7 @@ final class BoinkView: NSView {
             if speed > boinkSpeed && !isDizzy && sinceBoink > 1 { me.isNearMiss = true }
         } else if me.isNearMiss {
             me.isNearMiss = false
-            if age(me.dodgedAt) > 1 { dodge() }
+            if age(me.dodgedAt) > 1 && !me.tumbling { dodge() }
         }
     }
 
@@ -961,7 +1159,7 @@ final class BoinkView: NSView {
         if isAirborne {
             me.jellySpeed *= 0.995
         } else if isDizzy || isKO {
-            me.jellySpeed *= 0.9
+            me.jellySpeed *= me.tumbling ? tumbleFriction : 0.9
         } else if isDashing {
             target = me.dashDirection * dashSpeed
         } else if me.isScared {
@@ -992,9 +1190,13 @@ final class BoinkView: NSView {
         }
 
         me.jellyX += me.jellySpeed * tick
-        let wallKeep: CGFloat = isAirborne ? 0.7 : 0.3
+        let wallKeep: CGFloat = isAirborne || me.tumbling ? wallBounce : 0.3
+        let wallSpeed = abs(me.jellySpeed)
+        let hitWall = me.jellyX < margin || me.jellyX > bounds.width - margin
         if me.jellyX < margin { me.jellyX = margin; me.jellySpeed = abs(me.jellySpeed) * wallKeep }
         if me.jellyX > bounds.width - margin { me.jellyX = bounds.width - margin; me.jellySpeed = -abs(me.jellySpeed) * wallKeep }
+        if hitWall && me.tumbling && wallSpeed > splatSpeed && !me.isGone { splat(wallSpeed) }
+        if me.tumbling && !isAirborne && abs(me.jellySpeed) < 80 { me.tumbling = false }
     }
 
     func meanSegmentDistance(from point: CGPoint) -> CGFloat {
@@ -1138,11 +1340,15 @@ final class BoinkView: NSView {
     // Slimes on the ground shoulder each other apart instead of stacking up.
     func separate() {
         for a in blobs.indices {
-            for b in blobs.indices where b > a && !blobs[a].isAirborne && !blobs[b].isAirborne {
+            for b in blobs.indices where b > a && !blobs[a].isGone && !blobs[b].isGone {
                 let reach = blobRadius * (blobs[a].size + blobs[b].size) * 0.8
                 let gap = blobs[b].jellyX - blobs[a].jellyX
                 let overlap = reach - abs(gap)
                 guard overlap > 0 else { continue }
+                let closing = (blobs[a].jellySpeed - blobs[b].jellySpeed) * (gap >= 0 ? 1 : -1)
+                let isLevel = abs(blobs[a].lift - blobs[b].lift) < blobTop * (blobs[a].size + blobs[b].size) * 0.6
+                if (blobs[a].tumbling || blobs[b].tumbling) && isLevel && closing > bowlSpeed { bowl(a, b, closing: closing) }
+                guard !blobs[a].isAirborne && !blobs[b].isAirborne else { continue }
                 let push = (gap >= 0 ? 1 : -1) * overlap / 2
                 blobs[a].jellyX = clamp(blobs[a].jellyX - push, blobRadius * blobs[a].size + 8, bounds.width - blobRadius * blobs[a].size - 8)
                 blobs[b].jellyX = clamp(blobs[b].jellyX + push, blobRadius * blobs[b].size + 8, bounds.width - blobRadius * blobs[b].size - 8)
@@ -1200,8 +1406,10 @@ final class BoinkView: NSView {
         blobs.removeAll { $0.isGone && age($0.koAt) > koFor }
         current = 0
         if !isGameOver {
-            if blobs.isEmpty {
-                if hadBlobs { clearLevel() } else if age(clearedAt) > 1.6 { startLevel(level + 1) }
+            if isCountingDown {
+                countDown()
+            } else if blobs.isEmpty {
+                if hadBlobs { clearLevel() } else if age(clearedAt) > 1.6 && !isShopping { isShopping = true }
             } else if timeLeft <= 0 {
                 timeUp()
             }
@@ -1226,6 +1434,8 @@ final class BoinkView: NSView {
         NSGraphicsContext.restoreGraphicsState()
         drawBanner()
         drawScore()
+        drawShop()
+        drawCountdown()
         drawGameOver()
     }
 
@@ -2590,6 +2800,62 @@ extension BoinkView {
         }
     }
 
+    func drawShop() {
+        guard isShopping else { return }
+        let panel = shopFrame
+        NSColor.black.withAlphaComponent(0.78).setFill()
+        NSBezierPath(roundedRect: panel, xRadius: 18, yRadius: 18).fill()
+        drawText("SHOP", at: CGPoint(x: panel.midX, y: panel.maxY - 50), size: 32, color: .systemYellow, within: bounds.width)
+        drawText("🪙 \(gold) gold · next up: level \(level + 1)", at: CGPoint(x: panel.midX, y: panel.maxY - 76), size: 14, color: .white, weight: .bold, within: bounds.width)
+
+        let font = NSFont.systemFont(ofSize: 13, weight: .bold)
+        for (row, ware) in wares.enumerated() {
+            let frame = wareFrame(row)
+            let cost = price(ware)
+            let canBuy = cost.map { $0 <= gold } ?? false
+            NSColor.white.withAlphaComponent(canBuy ? 0.18 : 0.06).setFill()
+            NSBezierPath(roundedRect: frame, xRadius: 9, yRadius: 9).fill()
+            let name: String
+            let note: String
+            switch ware {
+            case .weapon(let choice):
+                name = "\(choice.label) · \(choice.blurb)"
+                note = cost.map { "\($0) 🪙" } ?? "owned ✓"
+            case .upgrade(let upgrade):
+                name = upgrade.label
+                note = cost.map { "\($0) 🪙" } ?? "maxed ✓"
+                for pip in 0..<maxRank {
+                    (pip < rank(upgrade) ? NSColor.systemYellow : NSColor.white.withAlphaComponent(0.2)).setFill()
+                    circle(CGPoint(x: frame.maxX - 150 + CGFloat(pip) * 13, y: frame.midY), 4).fill()
+                }
+            }
+            let shade = NSColor.white.withAlphaComponent(canBuy || cost == nil ? 0.95 : 0.45)
+            (name as NSString).draw(at: CGPoint(x: frame.minX + 12, y: frame.minY + 7), withAttributes: [.font: font, .foregroundColor: shade])
+            let noteStyle: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: canBuy ? NSColor.systemYellow : shade]
+            (note as NSString).draw(at: CGPoint(x: frame.maxX - 12 - (note as NSString).size(withAttributes: noteStyle).width, y: frame.minY + 7), withAttributes: noteStyle)
+        }
+
+        NSColor.systemGreen.setFill()
+        NSBezierPath(roundedRect: nextFrame, xRadius: 18, yRadius: 18).fill()
+        let next = "NEXT LEVEL ▶" as NSString
+        let nextStyle: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 15, weight: .black), .foregroundColor: NSColor.white]
+        let size = next.size(withAttributes: nextStyle)
+        next.draw(at: CGPoint(x: nextFrame.midX - size.width / 2, y: nextFrame.midY - size.height / 2), withAttributes: nextStyle)
+    }
+
+    func drawCountdown() {
+        guard isCountingDown else { return }
+        let into = age(countdownAt).truncatingRemainder(dividingBy: 1)
+        let pop = 1 + 0.6 * exp(-into * 8)
+        let fade = clamp((1 - into) / 0.3, 0, 1)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY + 20)
+        drawText("LEVEL \(upcoming)", at: CGPoint(x: center.x, y: center.y + 135), size: 30, color: .systemBlue, within: bounds.width)
+        let colors: [NSColor] = [.systemGreen, .systemYellow, .systemOrange, .systemRed, .systemPink]
+        let color = colors[max(0, min(colors.count - 1, countLeft - 1))]
+        drawText("\(countLeft)", at: CGPoint(x: center.x + 4, y: center.y - 4), size: 120 * pop, color: NSColor.black.withAlphaComponent(0.35 * fade), within: bounds.width)
+        drawText("\(countLeft)", at: center, size: 120 * pop, color: color.withAlphaComponent(fade), within: bounds.width)
+    }
+
     func drawGameOver() {
         guard isGameOver, age(gameOverAt) > 1 else { return }
         let fade = clamp((age(gameOverAt) - 1) / 0.4, 0, 1)
@@ -2665,10 +2931,10 @@ extension BoinkView {
         (number(score) as NSString).draw(at: CGPoint(x: panel.minX + 12, y: panel.maxY - 52), withAttributes: big)
         ("BEST" as NSString).draw(at: CGPoint(x: panel.minX + 170, y: panel.maxY - 20), withAttributes: label)
         (number(best) as NSString).draw(at: CGPoint(x: panel.minX + 170, y: panel.maxY - 38), withAttributes: small)
-        ("💥\(boinks)  ⚔️\(slices)  😅\(dodges)  💀\(kos)  🟢\(jellyHits)  x\(bestCombo)" as NSString).draw(at: CGPoint(x: panel.minX + 14, y: panel.minY + 6), withAttributes: small)
+        ("💥\(boinks)  ⚔️\(slices)  😅\(dodges)  💀\(kos)  🟢\(jellyHits)  x\(bestCombo)  🪙\(gold)" as NSString).draw(at: CGPoint(x: panel.minX + 14, y: panel.minY + 6), withAttributes: small)
 
-        ("LEVEL \(level)" as NSString).draw(at: CGPoint(x: panel.minX + 320, y: panel.maxY - 20), withAttributes: label)
-        let seconds = blobs.isEmpty ? 0 : timeLeft
+        ("LEVEL \(isCountingDown ? upcoming : level)" as NSString).draw(at: CGPoint(x: panel.minX + 320, y: panel.maxY - 20), withAttributes: label)
+        let seconds = isCountingDown ? levelTime : blobs.isEmpty ? 0 : timeLeft
         let clockStyle: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 26, weight: .black),
             .foregroundColor: seconds < 3 && !blobs.isEmpty ? NSColor.systemRed : NSColor.white,
@@ -2677,7 +2943,7 @@ extension BoinkView {
         NSColor.white.withAlphaComponent(0.2).setFill()
         NSBezierPath(roundedRect: NSRect(x: panel.minX + 320, y: panel.minY + 10, width: 96, height: 4), xRadius: 2, yRadius: 2).fill()
         (seconds < 3 ? NSColor.systemRed : NSColor.systemGreen).setFill()
-        NSBezierPath(roundedRect: NSRect(x: panel.minX + 320, y: panel.minY + 10, width: 96 * seconds / levelFor, height: 4), xRadius: 2, yRadius: 2).fill()
+        NSBezierPath(roundedRect: NSRect(x: panel.minX + 320, y: panel.minY + 10, width: 96 * seconds / levelTime, height: 4), xRadius: 2, yRadius: 2).fill()
 
         if isComboLive && combo >= 1 {
             let left = isAnyAirborne ? 1 : 1 - CGFloat(age(lastHitAt) / comboWindow)
@@ -2703,10 +2969,14 @@ extension BoinkView {
             .font: NSFont.systemFont(ofSize: 12, weight: .bold),
             .foregroundColor: NSColor.white.withAlphaComponent(0.9),
         ]
+        var locked = option
+        locked[.foregroundColor] = NSColor.white.withAlphaComponent(0.35)
         for choice in Weapon.all {
-            let label = choice.label as NSString
-            let width = label.size(withAttributes: option).width
-            label.draw(at: CGPoint(x: toggle.minX + slot * (CGFloat(choice.index) + 0.5) - width / 2, y: toggle.minY + 5), withAttributes: option)
+            let isOwned = owned.contains(choice)
+            let label = (isOwned ? choice.label : "🔒 \(choice.price)") as NSString
+            let style = isOwned ? option : locked
+            let width = label.size(withAttributes: style).width
+            label.draw(at: CGPoint(x: toggle.minX + slot * (CGFloat(choice.index) + 0.5) - width / 2, y: toggle.minY + 5), withAttributes: style)
         }
 
         NSColor.black.withAlphaComponent(0.45).setFill()
@@ -2737,6 +3007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         view = BoinkView(frame: NSRect(origin: .zero, size: windowSize))
         panel.contentView = view
+        view.countIn(to: 1)
         panel.orderFrontRegardless()
 
         Timer.scheduledTimer(withTimeInterval: Double(tick), repeats: true) { [weak self] _ in self?.frame() }
@@ -2764,7 +3035,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         view.step()
-        panel.ignoresMouseEvents = !(view.canRestart || view.held != nil || view.grip(at: point) != nil || view.isOverToggle(point))
+        panel.ignoresMouseEvents = !(view.canRestart || (view.isShopping && view.shopFrame.contains(point)) || view.held != nil || view.grip(at: point) != nil || view.isOverToggle(point))
     }
 }
 
@@ -3008,7 +3279,8 @@ if let path = argument(after: "--levels") {
         }
         let before = view.score
         let level = view.level
-        for frame in 0..<400 where view.level == level {
+        for frame in 0..<800 where view.level == level {
+            if view.isShopping { view.leaveShop() }
             view.step()
             if view.blobs.isEmpty && frame % 10 == 0 { save(view, to: path + "-between.png") }
         }
@@ -3022,7 +3294,7 @@ if let path = argument(after: "--levels") {
     view.boink(velocity: CGVector(dx: 0, dy: 900), slicingAt: view.bodyCenter)
     for _ in 0..<40 { view.step() }
     save(view, to: path + "-split.png")
-    for _ in 0..<Int(levelFor / tick) + 120 where !view.isGameOver { view.step() }
+    for _ in 0..<Int(view.levelTime / tick) + 120 where !view.isGameOver { view.step() }
     for _ in 0..<90 { view.step() }
     save(view, to: path + "-over.png")
     print("time's up: game over \(view.isGameOver), slimes left \(view.blobs.count), level \(view.level)")
@@ -3084,6 +3356,62 @@ if let level = argument(after: "--bench").flatMap({ Int($0) }) {
     let perFrame = Date().timeIntervalSince(start) / 300 * 1000
     print("level \(level): \(view.blobs.count) slimes, \(String(format: "%.2f", perFrame)) ms per frame")
     exit(0)
+}
+
+if let path = argument(after: "--smash") {
+    func knocked(_ weapon: Weapon, _ velocity: CGVector) -> (slid: Int, peak: Int) {
+        let view = batView()
+        view.arm(weapon)
+        view.me.jellyX = 200
+        view.boink(velocity: velocity)
+        var peak: CGFloat = 0
+        for _ in 0..<150 { view.step(); peak = max(peak, view.me.lift) }
+        return (Int(view.me.jellyX - 200), Int(peak))
+    }
+    for (name, velocity) in [("side", CGVector(dx: 1200, dy: 0)), ("up", CGVector(dx: 300, dy: 1200)), ("slam", CGVector(dx: 200, dy: -1200))] {
+        let bat = knocked(.bat, velocity)
+        let fish = knocked(.fish, velocity)
+        print("\(name): bat slides \(bat.slid) px, peaks \(bat.peak) px; fish slides \(fish.slid) px, peaks \(fish.peak) px")
+    }
+
+    let view = batView()
+    view.blobs = [Blob(at: 200), Blob(at: 520)]
+    view.current = 0
+    view.boink(velocity: CGVector(dx: 1400, dy: 0))
+    var saved = false
+    var bowled = false
+    for _ in 0..<180 {
+        let score = view.score
+        view.step()
+        if !bowled && view.score > score { bowled = true }
+        if !saved && view.blobs.count > 1 && view.blobs[1].jellySpeed > 200 { for _ in 0..<4 { view.step() }; save(view, to: path); saved = true }
+    }
+    print("bowl: second slime pushed to x \(view.blobs.map { Int($0.jellyX) }), health \(view.blobs.map { Int($0.health) }), combo \(view.bestCombo), K.O.s \(view.kos)")
+    exit(0)
+}
+
+if let path = argument(after: "--shop") {
+    let view = batView()
+    view.boink(velocity: CGVector(dx: 0, dy: -1500))
+    view.me.health = 0
+    view.knockOut()
+    for _ in 0..<200 where !view.isShopping { view.step() }
+    let earned = view.gold
+    view.gold += 100
+    view.buy(.weapon(.katana))
+    view.buy(.upgrade(.power))
+    view.buy(.upgrade(.power))
+    view.buy(.weapon(.katana))
+    for _ in 0..<10 { view.step() }
+    save(view, to: path)
+    let shopping = view.isShopping
+    view.leaveShop()
+    for frame in 0..<400 where view.isCountingDown {
+        view.step()
+        if frame == 150 { save(view, to: path + "-countdown.png") }
+    }
+    print("earned \(earned) gold on level 1, shop open \(shopping); after buying: \(view.gold) gold, weapon \(view.weapon), power rank \(view.rank(.power)); next level \(view.level), \(view.blobs.count) slimes")
+    exit(shopping && view.weapon == .katana && view.rank(.power) == 2 && view.gold == earned + 100 - 40 - 20 - 40 ? 0 : 1)
 }
 
 if let path = argument(after: "--stress") {
